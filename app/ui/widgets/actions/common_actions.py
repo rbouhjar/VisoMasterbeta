@@ -69,7 +69,8 @@ def create_default_parameter(main_window: 'MainWindow', parameter_name, paramete
 def create_parameter_dict_for_face_id(main_window: 'MainWindow', face_id=0):
     if not main_window.parameters.get(face_id):
         parameters =  main_window.parameters.get(main_window.selected_target_face_id) or main_window.current_widget_parameters or main_window.default_parameters
-        parameters = misc_helpers.ParametersDict(parameters, main_window.default_parameters)
+        if type(parameters)==dict:
+            parameters = misc_helpers.ParametersDict(parameters, main_window.default_parameters)
         main_window.parameters[face_id] = parameters.copy()
     # print("Created parameter_dict_for_face_id", face_id)
 
@@ -96,6 +97,9 @@ def update_parameter(main_window: 'MainWindow', parameter_name, parameter_value,
                 # By default an exec function definition should have atleast one parameter : MainWindow
                 exec_function_args = [main_window, parameter_value] + exec_function_args
                 exec_function(*exec_function_args)
+
+    if main_window.current_widget_parameters:
+        main_window.current_widget_parameters[parameter_name] = parameter_value
 
 def refresh_frame(main_window: 'MainWindow'):
     video_processor = main_window.video_processor

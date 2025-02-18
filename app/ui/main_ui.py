@@ -1,6 +1,7 @@
 from typing import Dict
 from pathlib import Path
 from functools import partial
+import copy
 
 from PySide6 import QtWidgets, QtGui
 from PySide6 import QtCore
@@ -188,6 +189,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.outputFolderButton.clicked.connect(partial(list_view_actions.select_output_media_folder, self))
         # Create a control value for OutputMediaFolder
         common_widget_actions.create_control(self, 'OutputMediaFolder', '')
+
+        # Initialize current_widget_parameters with default values
+        self.current_widget_parameters = ParametersDict(copy.deepcopy(self.default_parameters), self.default_parameters)
 
         # Initialize the button states
         video_control_actions.reset_media_buttons(self)

@@ -227,8 +227,9 @@ def load_saved_workspace(main_window: 'MainWindow', data_filename: str|bool = Fa
             if main_window.target_faces:
                 list(main_window.target_faces.values())[0].click()
             else:
-                main_window.current_widget_parameters = data.get('current_widget_parameters', {})
-                common_widget_actions.set_widgets_values_using_face_id_parameters(main_window) 
+                main_window.current_widget_parameters = data.get('current_widget_parameters', main_window.default_parameters.copy())
+                main_window.current_widget_parameters = misc_helpers.ParametersDict(main_window.current_widget_parameters, main_window.default_parameters)
+                common_widget_actions.set_widgets_values_using_face_id_parameters(main_window, face_id=False) 
         
 def save_current_workspace(main_window: 'MainWindow', data_filename:str|bool = False):
     target_faces_data = {}
