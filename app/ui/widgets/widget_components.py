@@ -26,6 +26,14 @@ class CardButton(QPushButton):
         super().__init__(*args)
         self.main_window: 'MainWindow' = kwargs.get('main_window', False)
         self.list_item  = None
+        self.list_widget: QtWidgets.QListWidget = None
+
+    def get_item_position(self):
+        for i in range(self.list_widget.count()-1, -1, -1):
+            list_item = self.list_widget.item(i)
+            if list_item.listWidget().itemWidget(list_item) == self:
+                return i
+        return None
 
 class TargetMediaCardButton(CardButton):
     def __init__(self, media_path: str, file_type: str, media_id:str, is_webcam=False, webcam_index=-1, webcam_backend=-1, *args, **kwargs):
@@ -237,12 +245,9 @@ class TargetMediaCardButton(CardButton):
                 self.media_capture.release()
                 self.media_capture = False
 
-        for i in range(main_window.targetVideosList.count()-1, -1, -1):
-            list_item = main_window.targetVideosList.item(i)
-            if list_item:
-                if list_item.listWidget().itemWidget(list_item) == self:
-                    main_window.targetVideosList.takeItem(i)   
-                    main_window.target_videos.pop(self.media_id)
+        i = self.get_item_position()
+        main_window.targetVideosList.takeItem(i)   
+        main_window.target_videos.pop(self.media_id)
 
         # If the target media list is empty, show the placeholder text
         if not main_window.target_videos:
@@ -395,20 +400,20 @@ class TargetFaceCardButton(CardButton):
         if main_window.video_processor.processing:
             main_window.video_processor.stop_processing()
             
-        for i in range(main_window.targetFacesList.count()-1, -1, -1):
-            list_item = main_window.targetFacesList.item(i)
-            if list_item:
-                if list_item.listWidget().itemWidget(list_item) == self:
-                    main_window.targetFacesList.takeItem(i)   
-                    main_window.target_faces.pop(self.face_id)
-                    # Pop parameters using the target's face_id
-                    main_window.parameters.pop(self.face_id)
+        i = self.get_item_position()
+        main_window.targetFacesList.takeItem(i)   
+        main_window.target_faces.pop(self.face_id)
+        # Pop parameters using the target's face_id
+        main_window.parameters.pop(self.face_id)
         # Click and Select the first target face if target_faces are not empty
         if main_window.target_faces:
             list(main_window.target_faces.values())[0].click()
+
         # Otherwise reset parameter widgets value to the default
         else:
             common_widget_actions.set_widgets_values_using_face_id_parameters(main_window, face_id=False)
+            main_window.selected_target_face_id = False
+
         video_control_actions.remove_face_parameters_and_control_from_markers(main_window, self.face_id) #Remove parameters for the face from all markers
         common_widget_actions.refresh_frame(self.main_window)
         self.deleteLater()
@@ -496,13 +501,12 @@ class InputFaceCardButton(CardButton):
         
     def remove_input_face_from_list(self):
         main_window = self.main_window
-        for i in range(main_window.inputFacesList.count()-1, -1, -1):
-            list_item = main_window.inputFacesList.item(i)
-            if list_item.listWidget().itemWidget(list_item) == self:
-                main_window.inputFacesList.takeItem(i)   
-                main_window.input_faces.pop(self.face_id)
-                for target_face_id in main_window.target_faces:
-                    main_window.target_faces[target_face_id].remove_assigned_input_face(self.face_id)
+        i = self.get_item_position()
+        main_window.inputFacesList.takeItem(i)   
+        main_window.input_faces.pop(self.face_id)
+        for target_face_id in main_window.target_faces:
+            main_window.target_faces[target_face_id].remove_assigned_input_face(self.face_id)
+
         common_widget_actions.refresh_frame(self.main_window)
         self.deleteLater()
         # If the input faces list is empty, show the placeholder text

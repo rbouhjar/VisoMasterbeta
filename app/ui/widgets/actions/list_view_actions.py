@@ -58,6 +58,7 @@ def add_media_thumbnail_button(main_window: 'MainWindow', buttonClass: 'widget_c
     list_item = QtWidgets.QListWidgetItem(listWidget)
     list_item.setSizeHint(button_size)
     button.list_item = list_item
+    button.list_widget = listWidget
     # Align the item to center
     list_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
     listWidget.setItemWidget(list_item, button)
