@@ -34,7 +34,56 @@ class CardButton(QPushButton):
             if list_item.listWidget().itemWidget(list_item) == self:
                 return i
         return None
+    
+    # To find the index of second last selected button by traversing the list
+    # Mainly used as a helper for Shift Selection of CardButtons
+    def get_index_of_second_last_selected_item(self):
+        total_items_count = self.list_widget.count()
+        if total_items_count < 2:
+            return None
+        selected_count = 0
+        for i in range(self.list_widget.count()-1, -1, -1):
+            list_item = self.list_widget.item(i)
+            card_button: CardButton = list_item.listWidget().itemWidget(list_item)
+            if card_button.isChecked():
+                selected_count+=1
+                if selected_count==2:
+                    return i
+        return None
+    
+    # To find all the selected buttons behind 'item_index' (Only those which are sequentially selected)
+    # Mainly used as a helper for Shift Selection of CardButtons    
+    def get_sequential_trailing_selected_items(self, item_index) -> list[tuple[int, QPushButton]]: 
+        selected_items = []
+        for i in range(item_index-1, -1, -1):
+            list_item = self.list_widget.item(i)
+            card_button: CardButton = list_item.listWidget().itemWidget(list_item)
+            if card_button.isChecked():
+                selected_items.append((i, card_button))
+            else:
+                break
+        return selected_items
+    
+    def deselect_all_trailing_items(self, item_index):
+        for i in range(item_index-1, -1, -1):
+            list_item = self.list_widget.item(i)
+            card_button: CardButton = list_item.listWidget().itemWidget(list_item)
+            card_button.blockSignals(True)
+            card_button.setChecked(False)
+            card_button.blockSignals(False)
 
+    def select_all_items_between_range(self, lower_range, upper_range) -> list[QPushButton]:
+        card_buttons = []
+        # Include items in the lower_range and upper_range indexes too
+        for i in range(lower_range, upper_range+1):
+            list_item = self.list_widget.item(i)
+            card_button: CardButton = list_item.listWidget().itemWidget(list_item)
+            card_button.blockSignals(True)
+            card_button.setChecked(True)
+            card_button.blockSignals(False)
+            card_buttons.append(card_button)
+        return card_buttons
+    
 class TargetMediaCardButton(CardButton):
     def __init__(self, media_path: str, file_type: str, media_id:str, is_webcam=False, webcam_index=-1, webcam_backend=-1, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -478,7 +527,36 @@ class InputFaceCardButton(CardButton):
 
         if main_window.cur_selected_target_face_button:
             cur_selected_target_face_button = main_window.cur_selected_target_face_button
-            if not QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ControlModifier:
+
+            if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
+                # Step 1: Find the index of the last selected item before selecting the 'current_item_position' item. If this is None, then shift select shouldn't work
+                # Step 2: Find and store the details of all sequentially selected items behind 'second_last_item_position'
+                # Step 3: If there are trailing items, then deselect all checked items behind the last sequentially trailing item (This is to make sure all unsequentially selected items are deselected)
+                # Step 4: Now select all the items between second_last_item_position (or last trailed item, if there was trailing selected items) and the current_item_position, to complete the Shift Selection
+                current_item_position = self.get_item_position()
+                second_last_item_position = self.get_index_of_second_last_selected_item()
+                if second_last_item_position is not None:
+                    selected_input_faces = []
+                    if current_item_position >= second_last_item_position:
+                        trailing_selected_items = self.get_sequential_trailing_selected_items(second_last_item_position)
+                        if trailing_selected_items:
+                            self.deselect_all_trailing_items(trailing_selected_items[-1][0])
+
+                            selected_input_faces = self.select_all_items_between_range(trailing_selected_items[-1][0], current_item_position)
+                        else:
+                            selected_input_faces = self.select_all_items_between_range(second_last_item_position, current_item_position)
+                    
+                    else:
+                        for input_face_id in cur_selected_target_face_button.assigned_input_faces.keys():
+                            input_face_button = main_window.input_faces[input_face_id]
+                            if input_face_button!=self:
+                                input_face_button.setChecked(False)
+
+                    cur_selected_target_face_button.assigned_input_faces = {}
+                    for input_face in selected_input_faces:
+                        cur_selected_target_face_button.assigned_input_faces[input_face.face_id] = input_face.embedding_store
+
+            elif not QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ControlModifier:
                 for input_face_id in cur_selected_target_face_button.assigned_input_faces.keys():
                     input_face_button = main_window.input_faces[input_face_id]
                     if input_face_button!=self:
