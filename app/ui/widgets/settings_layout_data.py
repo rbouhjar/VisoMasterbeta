@@ -230,6 +230,27 @@ SETTINGS_LAYOUT_DATA: LayoutDictTypes = {
             'help': 'Set the maximum frames per second (FPS) for webcam input.'
         },
     },
+    'Virtual Camera': {
+        'SendVirtCamFramesEnableToggle': {
+            'level': 1,
+            'label': 'Send Frames to Virtual Camera',
+            'default': False,
+            'help': 'Send the swapped video/webcam output to virtual camera for using in external applications',
+            'exec_function': control_actions.toggle_virtualcam,
+            'exec_function_args': [],
+        },
+        'VirtCamBackendSelection': {
+            'level': 1,
+            'label': 'Virtual Camera Backend',
+            'options': ['obs', 'unitycapture'],
+            'default': 'obs',
+            'help': 'Choose the backend based on the Virtual Camera you have set up',
+            'parentToggle': 'SendVirtCamFramesEnableToggle',
+            'requiredToggleValue': True,
+            'exec_function': control_actions.enable_virtualcam,
+            'exec_funtion_args': [],
+        },
+    },
     'Face Recognition': {
         'RecognitionModelSelection': {
             'level': 1,

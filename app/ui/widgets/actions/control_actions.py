@@ -53,3 +53,14 @@ def set_video_playback_fps(main_window: 'MainWindow', set_video_fps=False):
     # print("Called set_video_playback_fps()")
     if set_video_fps and main_window.video_processor.media_capture:
         main_window.parameter_widgets['VideoPlaybackCustomFpsSlider'].set_value(main_window.video_processor.fps)
+
+def toggle_virtualcam(main_window: 'MainWindow', toggle_value=False):
+    video_processor = main_window.video_processor
+    if toggle_value:
+        video_processor.enable_virtualcam()
+    else:
+        video_processor.disable_virtualcam()
+
+def enable_virtualcam(main_window: 'MainWindow', backend):
+    print('backend', backend)
+    main_window.video_processor.enable_virtualcam(backend=backend)

@@ -253,6 +253,9 @@ class TargetMediaCardButton(CardButton):
             common_widget_actions.refresh_frame(main_window)
             layout_actions.fit_image_to_view_onchange(main_window)
 
+        if main_window.control['SendVirtCamFramesEnableToggle'] and self.file_type!='image':
+            # Re-initialize virtualcam to reset its dimensions with that of the new video
+            main_window.video_processor.enable_virtualcam()
 
         # list_view_actions.find_target_faces(main_window)
 

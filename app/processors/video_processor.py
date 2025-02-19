@@ -11,6 +11,7 @@ from functools import partial
 import cv2
 import numpy
 import torch
+import pyvirtualcam
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QPixmap
@@ -45,6 +46,8 @@ class VideoProcessor(QObject):
 
         self.current_frame: numpy.ndarray = []
         self.recording = False
+
+        self.virtcam: pyvirtualcam.Camera|None = None
 
         self.recording_sp: subprocess.Popen|None = None 
         self.temp_file = '' 
@@ -108,6 +111,9 @@ class VideoProcessor(QObject):
             pixmap, frame = self.frames_to_display.pop(self.next_frame_to_display)
             self.current_frame = frame
 
+            # Check and send the frame to virtualcam, if the option is selected
+            self.send_frame_to_virtualcam(frame)
+
             if self.recording:
                 self.recording_sp.stdin.write(frame.tobytes())
             # Update the widget values using parameters if it is not recording (The updation of actual parameters is already done inside the FrameWorker, this step is to make the changes appear in the widgets)
@@ -127,8 +133,17 @@ class VideoProcessor(QObject):
         else:
             pixmap, frame = self.webcam_frames_to_display.get()
             self.current_frame = frame
+            self.send_frame_to_virtualcam(frame)
             graphics_view_actions.update_graphics_view(self.main_window, pixmap, 0)
 
+    def send_frame_to_virtualcam(self, frame):
+        if self.main_window.control['SendVirtCamFramesEnableToggle'] and self.virtcam:
+            # print("virtcam",self.virtcam)
+            try:
+                self.virtcam.send(frame[..., ::-1])
+                self.virtcam.sleep_until_next_frame()
+            except Exception as e:
+                print(e)
 
     def set_number_of_threads(self, value):
         self.stop_processing()
@@ -401,3 +416,22 @@ class VideoProcessor(QObject):
         ]
 
         self.recording_sp = subprocess.Popen(args, stdin=subprocess.PIPE)
+
+    def enable_virtualcam(self, backend=False):
+        #Check if capture contains any cv2 stream or is it an empty list
+        if self.media_capture:
+            vid_height = int(self.media_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            vid_width = int(self.media_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.disable_virtualcam()
+            try:
+                backend = backend or self.main_window.control['VirtCamBackendSelection']
+                # self.virtcam = pyvirtualcam.Camera(width=vid_width, height=vid_height, fps=int(self.fps), backend='unitycapture', device='Unity Video Capture')
+                self.virtcam = pyvirtualcam.Camera(width=vid_width, height=vid_height, fps=int(self.fps), backend=backend)
+
+            except Exception as e:
+                print(e)
+
+    def disable_virtualcam(self):
+        if self.virtcam:
+            self.virtcam.close()
+        self.virtcam = None
