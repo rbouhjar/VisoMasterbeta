@@ -118,7 +118,7 @@ def load_parameters_and_settings(main_window: 'MainWindow', face_id, load_settin
             if main_window.selected_target_face_id == face_id:
                 common_widget_actions.set_widgets_values_using_face_id_parameters(main_window, face_id)
             if load_settings:
-                main_window.control = data['control']
+                main_window.control.update(data['control'])
                 common_widget_actions.set_control_widgets_values(main_window)
             common_widget_actions.refresh_frame(main_window)
 

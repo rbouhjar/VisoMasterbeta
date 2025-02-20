@@ -388,7 +388,7 @@ def on_change_video_seek_slider(main_window: 'MainWindow', new_position=0):
 def update_parameters_and_control_from_marker(main_window: 'MainWindow', new_position: int):
     if main_window.markers.get(new_position):
         main_window.parameters = copy.deepcopy(main_window.markers[new_position]['parameters'])
-        main_window.control = main_window.markers[new_position]['control'].copy()
+        main_window.control.update(main_window.markers[new_position]['control'].copy())
 
 def update_widget_values_from_markers(main_window: 'MainWindow', new_position: int):
     if main_window.markers.get(new_position):
