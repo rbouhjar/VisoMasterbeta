@@ -414,8 +414,8 @@ def on_change_video_seek_slider(main_window: 'MainWindow', new_position=0):
         if ret:
             pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
             graphics_view_actions.update_graphics_view(main_window, pixmap, new_position)
-            # restore slider position 
-            video_processor.media_capture.set(cv2.CAP_PROP_POS_FRAMES, new_position)
+            if video_processor.current_frame_number == video_processor.max_frame_number:
+                video_processor.media_capture.set(cv2.CAP_PROP_POS_FRAMES, new_position)
             update_parameters_and_control_from_marker(main_window, new_position)
             update_widget_values_from_markers(main_window, new_position)
 
