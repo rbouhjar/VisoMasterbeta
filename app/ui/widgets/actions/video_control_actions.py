@@ -408,6 +408,26 @@ def on_change_video_seek_slider(main_window: 'MainWindow', new_position=0):
 
     video_processor.current_frame_number = new_position
     video_processor.next_frame_to_display = new_position
+    # Reset temporal state so the next processed frame performs a clean detection and swap
+    try:
+        # Clear tracking/detection caches
+        video_processor.last_detections = None
+        video_processor.last_input_frame_rgb = None
+        video_processor.last_input_frame_number = -1
+        video_processor.fallback_track_frames = 0
+        # Reset recognition assist state
+        video_processor.recog_no_match_streak = {}
+        video_processor.recog_threshold_offset = {}
+        # Reset spatial lock anchor so the first detection after seek can re-anchor
+        video_processor.last_swapped_center = {}
+        # Clear smoothing filters (rotation/transform) to avoid mixing different scenes
+        with video_processor.rotation_lock:
+            video_processor.rotation_filters.clear()
+            video_processor.rotation_hysteresis.clear()
+            video_processor.transform_filters.clear()
+            video_processor._filter_last_seen.clear()
+    except Exception:
+        pass
     if video_processor.media_capture:
         video_processor.media_capture.set(cv2.CAP_PROP_POS_FRAMES, new_position)
         ret, frame = misc_helpers.read_frame(video_processor.media_capture)

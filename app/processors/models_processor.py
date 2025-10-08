@@ -61,10 +61,17 @@ class ModelsProcessor(QtCore.QObject):
             'trt_layer_norm_fp32_fallback': True,
             'trt_builder_optimization_level': 5,
         }
+        # Cache available providers once and keep a TRT guard flag
+        try:
+            self.available_providers = set(onnxruntime.get_available_providers())
+        except Exception:
+            self.available_providers = { 'CPUExecutionProvider' }
+        self.trt_disabled_after_failure = False
+
         self.providers = [
             ('CUDAExecutionProvider'),
             ('CPUExecutionProvider')
-        ]       
+        ]
         self.nThreads = 2
         self.syncvec = torch.empty((1, 1), dtype=torch.float32, device=self.device)
 
@@ -76,7 +83,8 @@ class ModelsProcessor(QtCore.QObject):
             model_name, model_path = model_data['model_name'], model_data['local_path']
             self.models[model_name] = None #Model Instance
             self.models_path[model_name] = model_path
-            self.models_data[model_name] = {'local_path': model_data['local_path'], 'hash': model_data['hash'], 'url': model_data.get('url')}
+            # Keep full metadata so we can access hints later
+            self.models_data[model_name] = dict(model_data)
 
         self.dfm_models: Dict[str, DFMModel] = {}
 
@@ -122,16 +130,90 @@ class ModelsProcessor(QtCore.QObject):
         self.lp_mask_crop = self.face_editors.lp_mask_crop
         self.lp_lip_array = self.face_editors.lp_lip_array
 
-    def load_model(self, model_name, session_options=None):
+        # Optional per-model provider hints (e.g., avoid TRT for specific models)
+        # Values can be a list of providers (ordered) or a callable returning such list.
+        # Seed from models_data entries that contain a 'provider_hint'.
+        self.provider_hints = {}
+        for _mn, _md in self.models_data.items():
+            if isinstance(_md, dict) and 'provider_hint' in _md:
+                self.provider_hints[_mn] = _md['provider_hint']
+
+    def load_model(self, model_name, session_options=None, provider_override=None):
         with self.model_lock:
             self.main_window.model_loading_signal.emit()
             # QApplication.processEvents()
             # if not is_file_exists(self.models_path[model_name]):
             #     download_file(model_name, self.models_path[model_name], self.models_data[model_name]['hash'], self.models_data[model_name]['url'])
-            if session_options is None:
-                model_instance = onnxruntime.InferenceSession(self.models_path[model_name], providers=self.providers)
+            # Resolve effective providers with guard (remove TRT if disabled/unavailable)
+            def _effective_providers():
+                provs = list(self.providers)
+                # Strip TRT EP if not available or disabled
+                if any(isinstance(p, tuple) and p[0] == 'TensorrtExecutionProvider' or p == 'TensorrtExecutionProvider' for p in provs):
+                    if self.trt_disabled_after_failure or 'TensorrtExecutionProvider' not in self.available_providers or not TENSORRT_AVAILABLE:
+                        provs = [p for p in provs if (isinstance(p, tuple) and p[0] != 'TensorrtExecutionProvider') and (not isinstance(p, str) or p != 'TensorrtExecutionProvider')]
+                # If CUDA EP isn't available, drop it and fall back to CPU
+                if ('CUDAExecutionProvider' not in self.available_providers):
+                    provs = [p for p in provs if (isinstance(p, tuple) and p[0] != 'CUDAExecutionProvider') and (not isinstance(p, str) or p != 'CUDAExecutionProvider')]
+                    if not any((isinstance(p, tuple) and p[0] == 'CPUExecutionProvider') or (isinstance(p, str) and p == 'CPUExecutionProvider') for p in provs):
+                        provs.append('CPUExecutionProvider')
+                return provs
+
+            # Apply provider_override if specified, else per-model provider hints if present
+            if provider_override is not None:
+                hinted = provider_override
+                # Normalize to list
+                if isinstance(hinted, str):
+                    hinted = [hinted]
+                hinted_list = list(hinted)
+                hinted_list = [p for p in hinted_list if (p == 'CPUExecutionProvider') or (p in self.available_providers)]
+                if not hinted_list:
+                    hinted_list = _effective_providers()
+                providers_try = hinted_list
+            elif model_name in getattr(self, 'provider_hints', {}):
+                hinted = self.provider_hints[model_name]
+                hinted_list = hinted(self) if callable(hinted) else list(hinted)
+                # Filter out providers not available, but keep CPU as last resort
+                hinted_list = [p for p in hinted_list if (p == 'CPUExecutionProvider') or (p in self.available_providers)]
+                if not hinted_list:
+                    hinted_list = _effective_providers()
+                providers_try = hinted_list
             else:
-                model_instance = onnxruntime.InferenceSession(self.models_path[model_name], sess_options=session_options, providers=self.providers)
+                providers_try = _effective_providers()
+            # Attempt session creation with graceful fallback sequence
+            def _create_session(providers):
+                if session_options is None:
+                    return onnxruntime.InferenceSession(self.models_path[model_name], providers=providers)
+                return onnxruntime.InferenceSession(self.models_path[model_name], sess_options=session_options, providers=providers)
+
+            try:
+                model_instance = _create_session(providers_try)
+            except Exception as e:
+                msg = str(e)
+                # If TRT was requested/attempted, disable it and retry
+                if 'TensorrtExecutionProvider' in msg or any((isinstance(p, tuple) and p[0] == 'TensorrtExecutionProvider') or (isinstance(p, str) and p == 'TensorrtExecutionProvider') for p in providers_try):
+                    print('[ProviderGuard] Disabling TensorRT after failure; retrying with CUDA/CPU.')
+                    self.trt_disabled_after_failure = True
+                    providers_try = [ 'CUDAExecutionProvider', 'CPUExecutionProvider' ] if 'CUDAExecutionProvider' in self.available_providers else [ 'CPUExecutionProvider' ]
+                    try:
+                        model_instance = _create_session(providers_try)
+                        # Adjust global device if we had to fall back to CPU only
+                        self.device = 'cuda' if 'CUDAExecutionProvider' in providers_try else 'cpu'
+                    except Exception as e2:
+                        msg2 = str(e2)
+                        # Final fallback: CPU only
+                        print('[ProviderGuard] CUDA failed after TRT disabled; forcing CPUExecutionProvider. Reason:', msg2)
+                        providers_try = [ 'CPUExecutionProvider' ]
+                        model_instance = _create_session(providers_try)
+                        self.device = 'cpu'
+                else:
+                    # If CUDA failed, try CPU
+                    if 'CUDAExecutionProvider' in msg:
+                        print('[ProviderGuard] CUDA EP failed; retrying on CPUExecutionProvider.')
+                        providers_try = [ 'CPUExecutionProvider' ]
+                        model_instance = _create_session(providers_try)
+                        self.device = 'cpu'
+                    else:
+                        raise
 
             # Check if another thread has already loaded an instance for this model, if yes then delete the current one and return that instead
             if self.models[model_name]:
@@ -140,7 +222,74 @@ class ModelsProcessor(QtCore.QObject):
                 return self.models[model_name]
             self.main_window.model_loaded_signal.emit()
 
+            # Perform a minimal warmup to reduce first-run latency and surface issues early
+            try:
+                self._warmup_session(model_name, model_instance)
+            except Exception:
+                # Warmup is best-effort; ignore failures to avoid blocking
+                pass
+
             return model_instance
+
+    def _warmup_session(self, model_name: str, sess):
+        try:
+            import numpy as np
+            import torch
+        except Exception:
+            return
+        # Determine run device from session providers
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        io = sess.io_binding()
+        # Bind inputs with minimal dummy buffers
+        for inp in sess.get_inputs():
+            # Map ONNX type to numpy/torch types for binding
+            onnx_type = getattr(inp, 'type', 'tensor(float)')
+            if onnx_type == 'tensor(float16)':
+                elem_type = np.float16
+                torch_dtype = torch.float16
+            elif onnx_type == 'tensor(uint8)':
+                elem_type = np.uint8
+                torch_dtype = torch.uint8
+            elif onnx_type == 'tensor(int64)':
+                elem_type = np.int64
+                torch_dtype = torch.int64
+            elif onnx_type == 'tensor(int32)':
+                elem_type = np.int32
+                torch_dtype = torch.int32
+            else:
+                elem_type = np.float32
+                torch_dtype = torch.float32
+
+            # If static shape present, use it; otherwise default each dynamic dim to 1
+            shape = []
+            for d in inp.shape:
+                if isinstance(d, int) and d > 0:
+                    shape.append(d)
+                else:
+                    shape.append(1)
+            if not shape:
+                shape = [1]
+            dummy = torch.zeros(tuple(shape), dtype=torch_dtype, device=run_device)
+            io.bind_input(name=inp.name, device_type=run_device, device_id=0, element_type=elem_type, shape=dummy.size(), buffer_ptr=dummy.data_ptr())
+        # Bind all outputs to run_device (let ORT allocate)
+        for out in sess.get_outputs():
+            io.bind_output(out.name, run_device)
+        if run_device == 'cuda':
+            torch.cuda.synchronize()
+        else:
+            self.syncvec.cpu()
+        try:
+            sess.run_with_iobinding(io)
+        except Exception:
+            # Fall back to regular run without io_binding
+            try:
+                sess.run(None, {})
+            except Exception:
+                pass
 
     def load_dfm_model(self, dfm_model):
         with self.model_lock:
@@ -220,12 +369,13 @@ class ModelsProcessor(QtCore.QObject):
     def switch_providers_priority(self, provider_name):
         match provider_name:
             case "TensorRT" | "TensorRT-Engine":
-                providers = [
-                                ('TensorrtExecutionProvider', self.trt_ep_options),
-                                ('CUDAExecutionProvider'),
-                                ('CPUExecutionProvider')
-                            ]
-                self.device = 'cuda'
+                # If TRT is not available or previously disabled, prefer CUDA -> CPU
+                if (not TENSORRT_AVAILABLE) or ('TensorrtExecutionProvider' not in getattr(self, 'available_providers', set())) or self.trt_disabled_after_failure:
+                    providers = [ ('CUDAExecutionProvider'), ('CPUExecutionProvider') ] if 'CUDAExecutionProvider' in self.available_providers else [ ('CPUExecutionProvider') ]
+                    self.device = 'cuda' if 'CUDAExecutionProvider' in self.available_providers else 'cpu'
+                else:
+                    providers = [ ('TensorrtExecutionProvider', self.trt_ep_options), ('CUDAExecutionProvider'), ('CPUExecutionProvider') ]
+                    self.device = 'cuda'
                 if version.parse(trt.__version__) < version.parse("10.2.0") and provider_name == "TensorRT-Engine":
                     print("TensorRT-Engine provider cannot be used when TensorRT version is lower than 10.2.0.")
                     provider_name = "TensorRT"
@@ -236,11 +386,26 @@ class ModelsProcessor(QtCore.QObject):
                             ]
                 self.device = 'cpu'
             case "CUDA":
-                providers = [
-                                ('CUDAExecutionProvider'),
-                                ('CPUExecutionProvider')
-                            ]
-                self.device = 'cuda'
+                if 'CUDAExecutionProvider' in self.available_providers:
+                    providers = [ ('CUDAExecutionProvider'), ('CPUExecutionProvider') ]
+                    self.device = 'cuda'
+                else:
+                    providers = [ ('CPUExecutionProvider') ]
+                    self.device = 'cpu'
+            case "Auto":
+                # Prefer TRT if viable, else CUDA, else CPU
+                if (TENSORRT_AVAILABLE) and ('TensorrtExecutionProvider' in self.available_providers) and (not self.trt_disabled_after_failure):
+                    providers = [ ('TensorrtExecutionProvider', self.trt_ep_options), ('CUDAExecutionProvider'), ('CPUExecutionProvider') ]
+                    self.device = 'cuda'
+                    provider_name = 'TensorRT'
+                elif 'CUDAExecutionProvider' in self.available_providers:
+                    providers = [ ('CUDAExecutionProvider'), ('CPUExecutionProvider') ]
+                    self.device = 'cuda'
+                    provider_name = 'CUDA'
+                else:
+                    providers = [ ('CPUExecutionProvider') ]
+                    self.device = 'cpu'
+                    provider_name = 'CPU'
             #case _:
 
         self.providers = providers
@@ -407,3 +572,43 @@ class ModelsProcessor(QtCore.QObject):
 
     def apply_fake_diff(self, swapped_face, original_face, DiffAmount):
         return self.face_masks.apply_fake_diff(swapped_face, original_face, DiffAmount)
+
+    # Optional: minimal warmup to surface provider issues early and reduce first-run latency
+    def warmup(self, targets=None):
+        targets = targets or ['faceparser', 'landmarks478', 'xseg', 'occluder']
+        results = {}
+        # Ensure providers are set (keep current setting)
+        for t in targets:
+            try:
+                if t == 'faceparser':
+                    import torch
+                    mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
+                    std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
+                    inp = (torch.rand((1, 3, 512, 512), dtype=torch.float32) - mean) / std
+                    out = torch.empty((1, 19, 512, 512), dtype=torch.float32, device='cpu')
+                    self.run_faceparser(inp, out)
+                    results[t] = 'ok'
+                elif t == 'landmarks478':
+                    import numpy as np
+                    import torch
+                    img = torch.randint(0, 255, (3, 512, 512), dtype=torch.uint8)
+                    bbox = np.array([100, 100, 400, 400], dtype=np.float32)
+                    _ = self.run_detect_landmark(img, bbox, det_kpss=np.array([]), detect_mode='478', score=0.0, from_points=False)
+                    results[t] = 'ok'
+                elif t == 'xseg':
+                    import torch
+                    image = torch.rand((1, 3, 256, 256), dtype=torch.float32)
+                    output = torch.empty((1, 1, 256, 256), dtype=torch.float32, device='cpu')
+                    self.run_dfl_xseg(image, output)
+                    results[t] = 'ok'
+                elif t == 'occluder':
+                    import torch
+                    image = torch.rand((1, 3, 256, 256), dtype=torch.float32)
+                    output = torch.empty((1, 1, 256, 256), dtype=torch.float32, device='cpu')
+                    self.run_occluder(image, output)
+                    results[t] = 'ok'
+                else:
+                    results[t] = 'skipped'
+            except Exception as e:
+                results[t] = f'fail: {e}'
+        return results

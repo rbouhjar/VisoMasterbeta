@@ -398,14 +398,18 @@ def warp_face_by_bounding_box(img, bboxes, image_size=112):
 
     return img, M
 
-def warp_face_by_face_landmark_5(img, kpss, image_size=112, mode='arcface112', interpolation=v2.InterpolationMode.NEAREST):
+def warp_face_by_face_landmark_5(img, kpss, image_size=112, mode='arcface112', interpolation=v2.InterpolationMode.NEAREST, *, roll_threshold_deg: float = 0.0):
     # pad image by image size
     img = pad_image_by_size(img, image_size)
 
     M, pose_index = estimate_norm(kpss, image_size, mode=mode)
     t = trans.SimilarityTransform()
     t.params[0:2] = M
-    img = v2.functional.affine(img, t.rotation*57.2958, (t.translation[0], t.translation[1]) , t.scale, 0, interpolation=interpolation, center = (0, 0) )
+    # Optional gating: ignore tiny roll corrections to reduce re-sampling blur/jitter
+    rot_deg = float(t.rotation * 57.2958)
+    if roll_threshold_deg and abs(rot_deg) < roll_threshold_deg:
+        rot_deg = 0.0
+    img = v2.functional.affine(img, rot_deg, (t.translation[0], t.translation[1]) , t.scale, 0, interpolation=interpolation, center = (0, 0) )
     img = v2.functional.crop(img, 0,0, image_size, image_size)
 
     return img, M
@@ -437,6 +441,52 @@ def invertAffineTransform(M):
     IM = np.linalg.inv(M_H)
 
     return IM
+
+# --- Simple OneEuro filter utility for temporal smoothing of angles ---
+class OneEuroFilter:
+    def __init__(self, freq=30.0, min_cutoff=1.2, beta=0.01, d_cutoff=1.0):
+        self.freq = float(freq)
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        self._x_prev = None
+        self._dx_prev = None
+        self._t_prev = None
+
+    @staticmethod
+    def _alpha(cutoff, freq):
+        # 1 / (1 + tau * 2*pi*f); tau = 1/(2*pi*cutoff)
+        tau = 1.0 / (2.0 * np.pi * float(cutoff))
+        te = 1.0 / float(freq)
+        return 1.0 / (1.0 + tau / te)
+
+    def filter(self, x, t=None):
+        # If t is provided, update freq from timestamps
+        if t is not None and self._t_prev is not None and t > self._t_prev:
+            dt = t - self._t_prev
+            if dt > 1e-6:
+                self.freq = 1.0 / dt
+        self._t_prev = t if t is not None else self._t_prev
+
+        x = float(x)
+        if self._x_prev is None:
+            self._x_prev = x
+            self._dx_prev = 0.0
+            return x
+
+        # Derivative estimate
+        dx = (x - self._x_prev) * self.freq
+        alpha_d = self._alpha(self.d_cutoff, self.freq)
+        dx_hat = alpha_d * dx + (1.0 - alpha_d) * (self._dx_prev if self._dx_prev is not None else dx)
+
+        # Dynamic cutoff
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        alpha = self._alpha(cutoff, self.freq)
+        x_hat = alpha * x + (1.0 - alpha) * self._x_prev
+
+        self._x_prev = x_hat
+        self._dx_prev = dx_hat
+        return x_hat
 
 def warp_face_by_bounding_box_for_landmark_68(img, bbox, input_size):
     """
@@ -1348,7 +1398,12 @@ def warp_face_by_face_landmark_x(img, pts, **kwargs):
 
     t = trans.SimilarityTransform()
     t.params[0:2] = M_o2c
-    img = v2.functional.affine(img, t.rotation*57.2958, translate=(t.translation[0], t.translation[1]), scale=t.scale, shear=(0.0, 0.0), interpolation=interpolation, center=(0, 0))
+    # Optional gating: ignore tiny roll corrections if requested via kwargs
+    roll_threshold_deg = kwargs.get('roll_threshold_deg', 0.0) or 0.0
+    rot_deg = float(t.rotation * 57.2958)
+    if roll_threshold_deg and abs(rot_deg) < roll_threshold_deg:
+        rot_deg = 0.0
+    img = v2.functional.affine(img, rot_deg, translate=(t.translation[0], t.translation[1]), scale=t.scale, shear=(0.0, 0.0), interpolation=interpolation, center=(0, 0))
     img = v2.functional.crop(img, 0,0, dsize, dsize)
 
     return img, M_o2c, M_c2o

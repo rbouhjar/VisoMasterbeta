@@ -16,8 +16,10 @@ import pyvirtualcam
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QPixmap
 from app.processors.workers.frame_worker import FrameWorker
+from app.processors.utils import faceutil
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import common_actions as common_widget_actions
+from app.ui.widgets.actions import preset_actions
 
 from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import layout_actions
@@ -76,8 +78,61 @@ class VideoProcessor(QObject):
         # Timer to update the gpu memory usage progressbar 
         self.gpu_memory_update_timer = QTimer()
         self.gpu_memory_update_timer.timeout.connect(partial(common_widget_actions.update_gpu_memory_progressbar, main_window))
+        # AI Agent heartbeat on UI thread
+        self.ai_agent_timer = QTimer()
+        self.ai_agent_timer.timeout.connect(self._ai_agent_tick)
 
         self.single_frame_processed_signal.connect(self.display_current_frame)
+
+        # --- Per-face temporal smoothing state for rotations ---
+        # OneEuro filters keyed by target face_id
+        self.rotation_filters = {}  # type: dict
+        # Hysteresis engaged flags per face_id
+        self.rotation_hysteresis = {}  # type: dict
+        # Guard concurrent access from worker threads
+        self.rotation_lock = threading.Lock()
+
+        # --- Per-face temporal smoothing for transform (translation/scale) ---
+        # Dict of face_id -> {'tx': OneEuroFilter, 'ty': OneEuroFilter, 's': OneEuroFilter}
+        self.transform_filters = {}
+        # Track last-seen timestamps per face for cleanup
+        self._filter_last_seen = {}
+        # Cleanup cadence: frames between sweeps and stale timeout (seconds)
+        self._filter_cleanup_every_n_frames = 120
+        self._filter_stale_timeout_sec = 30.0
+
+        # --- Detection fallback (use previous frame) ---
+        # Cache last successful detections and input frame to enable LK optical flow tracking when a frame misses detections
+        self.last_detections = None  # dict with keys: bboxes, kpss_5, kpss, frame_number
+        self.last_input_frame_rgb = None  # numpy RGB frame corresponding to last_detections
+        self.last_input_frame_number = -1
+        self.fallback_track_frames = 0  # length of current LK tracking chain
+        self.fallback_max_chain = 3     # max consecutive frames to allow tracking without re-detection
+
+        # --- Adaptive recognition threshold assist (per target face) ---
+        # face_id -> consecutive frames with detected face but under-threshold similarity
+        self.recog_no_match_streak = {}
+        # face_id -> current effective threshold offset applied (negative values lower the threshold)
+        self.recog_threshold_offset = {}
+
+        # --- Scene metrics (updated every processed frame by FrameWorker) ---
+        # Used by the AI Preset Agent to make decisions on the main/UI thread
+        self.scene_metrics = {
+            'motion': 0.0,
+            'light': 0.5,
+            'contrast': 0.5,
+            'face_ratio': 0.0,
+            'difficulty': 0.0,
+        }
+        # Agent state: currently active auto profile and last switch timestamp (monotonic seconds)
+        self.ai_agent_state = {
+            'active_profile': None,
+            'last_switch_ts': 0.0,
+        }
+        # After a frame with no detections, briefly relax spatial lock to re-acquire
+        self.relax_lock_frames = 0
+        # Count consecutive frames with zero detections to adapt relaxation a bit
+        self.det_no_face_streak = 0
 
     Slot(int, QPixmap, numpy.ndarray)
     def store_frame_to_display(self, frame_number, pixmap, frame):
@@ -102,6 +157,12 @@ class VideoProcessor(QObject):
         torch.cuda.empty_cache()
         #Set GPU Memory Progressbar
         common_widget_actions.update_gpu_memory_progressbar(self.main_window)
+        # Decay relax window for lock gating after a miss
+        try:
+            if self.relax_lock_frames > 0:
+                self.relax_lock_frames -= 1
+        except Exception:
+            pass
     def display_next_frame(self):
         if not self.processing or (self.next_frame_to_display > self.max_frame_number):
             self.stop_processing()
@@ -123,6 +184,24 @@ class VideoProcessor(QObject):
             self.threads.pop(self.next_frame_to_display)
             self.next_frame_to_display += 1
 
+            # Periodic cleanup of stale per-face filters
+            try:
+                if (self.next_frame_to_display % self._filter_cleanup_every_n_frames) == 0:
+                    now = time.perf_counter()
+                    stale = []
+                    for face_id, ts in list(self._filter_last_seen.items()):
+                        if (now - ts) > self._filter_stale_timeout_sec:
+                            stale.append(face_id)
+                    if stale:
+                        with self.rotation_lock:
+                            for fid in stale:
+                                self.transform_filters.pop(fid, None)
+                                self.rotation_filters.pop(fid, None)
+                                self.rotation_hysteresis.pop(fid, None)
+                                self._filter_last_seen.pop(fid, None)
+            except Exception:
+                pass
+
     def display_next_webcam_frame(self):
         # print("Called display_next_webcam_frame()")
         if not self.processing:
@@ -135,6 +214,67 @@ class VideoProcessor(QObject):
             self.current_frame = frame
             self.send_frame_to_virtualcam(frame)
             graphics_view_actions.update_graphics_view(self.main_window, pixmap, 0)
+
+    def _ai_agent_tick(self):
+        """Runs on UI thread. Selects an appropriate preset based on scene metrics.
+        Applies with min dwell (cooldown) to avoid flicker. No-ops when disabled or no faces set.
+        """
+        try:
+            if not self.main_window.control.get('AIAgentEnableToggle', False):
+                return
+            # Require at least one target face to be meaningful
+            if not self.main_window.target_faces:
+                return
+            sm = self.scene_metrics or {}
+            motion = float(sm.get('motion', 0.0))
+            light = float(sm.get('light', 0.5))
+            contrast = float(sm.get('contrast', 0.5))
+            face_ratio = float(sm.get('face_ratio', 0.0))
+            difficulty = float(sm.get('difficulty', 0.0))
+
+            # Score presets; higher score wins
+            # Heuristics:
+            # - Vlog Mobile for high motion or tiny faces
+            # - Low-Light for low light or low contrast
+            # - Portrait Stable otherwise
+            score_vlog = (motion * 2.0) + max(0.0, 0.15 - face_ratio) * 8.0
+            score_low = max(0.0, 0.5 - light) * 3.0 + max(0.0, 0.5 - contrast) * 2.5
+            score_portrait = 1.0 + max(0.0, face_ratio - 0.20) * 2.0 + max(0.0, 0.7 - motion) * 1.0
+
+            # Pick best
+            best = 'Portrait Stable'
+            best_score = score_portrait
+            if score_vlog > best_score:
+                best = 'Vlog Mobile'; best_score = score_vlog
+            if score_low > best_score:
+                best = 'Low-Light'; best_score = score_low
+
+            # Enforce min dwell
+            min_dwell_s = float(self.main_window.control.get('AIAgentMinDwellSecondsSlider', 6))
+            now = time.perf_counter()
+            active = self.ai_agent_state.get('active_profile')
+            last_ts = float(self.ai_agent_state.get('last_switch_ts', 0.0))
+            if active == best and (now - last_ts) < min_dwell_s:
+                return
+            if (now - last_ts) < min_dwell_s:
+                # Still within dwell; but allow upgrade to Vlog if motion is extremely high
+                if best != active and best == 'Vlog Mobile' and motion > 1.2:
+                    pass
+                else:
+                    return
+
+            # Apply preset via existing action; this updates control and parameters safely
+            preset_actions.apply_preset(self.main_window, best)
+            self.ai_agent_state['active_profile'] = best
+            self.ai_agent_state['last_switch_ts'] = now
+
+            # Optional toast feedback
+            try:
+                common_widget_actions.create_and_show_toast_message(self.main_window, 'AI Agent', f'Profil appliqué: {best}', style_type='information')
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def send_frame_to_virtualcam(self, frame: numpy.ndarray):
         if self.main_window.control['SendVirtCamFramesEnableToggle'] and self.virtcam:
@@ -200,12 +340,21 @@ class VideoProcessor(QObject):
                     self.frame_read_timer.start(interval)
                     self.frame_display_timer.start()
                 self.gpu_memory_update_timer.start(5000) #Update GPU memory progressbar every 5 Seconds
+                # Start AI Agent timer; tick will no-op if disabled
+                try:
+                    self.ai_agent_timer.start(700)  # ~1.4 Hz
+                except Exception:
+                    pass
 
             else:
                 print("Error: Unable to open the video.")
                 self.processing = False
                 self.frame_read_timer.stop()
                 video_control_actions.set_play_button_icon_to_play(self.main_window)
+                try:
+                    self.ai_agent_timer.stop()
+                except Exception:
+                    pass
         # 
         elif self.file_type == 'webcam':
             print("Calling process_video() on Webcam stream")
@@ -220,6 +369,11 @@ class VideoProcessor(QObject):
             self.frame_display_timer.timeout.connect(self.display_next_webcam_frame)
             self.frame_display_timer.start()
             self.gpu_memory_update_timer.start(5000) #Update GPU memory progressbar every 5 Seconds
+            # Start AI Agent timer; tick will no-op if disabled
+            try:
+                self.ai_agent_timer.start(700)
+            except Exception:
+                pass
 
 
 
@@ -332,6 +486,10 @@ class VideoProcessor(QObject):
             self.frame_read_timer.stop()
             self.frame_display_timer.stop()
             self.gpu_memory_update_timer.stop()
+            try:
+                self.ai_agent_timer.stop()
+            except Exception:
+                pass
             self.join_and_clear_threads()
 
 

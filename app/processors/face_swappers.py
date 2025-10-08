@@ -32,7 +32,10 @@ class FaceSwappers:
     def recognize(self, arcface_model, img, face_kps, similarity_type):
         if similarity_type == 'Optimal':
             # Find transform & Transform
-            img, _ = faceutil.warp_face_by_face_landmark_5(img, face_kps, mode='arcfacemap', interpolation=v2.InterpolationMode.BILINEAR)
+            # Apply tiny-roll gating to avoid micro-rotations (keeps natural look)
+            img, _ = faceutil.warp_face_by_face_landmark_5(
+                img, face_kps, mode='arcfacemap', interpolation=v2.InterpolationMode.BILINEAR, roll_threshold_deg=3.0
+            )
         elif similarity_type == 'Pearl':
             # Find transform
             dst = self.models_processor.arcface_dst.copy()
@@ -41,8 +44,11 @@ class FaceSwappers:
             tform = trans.SimilarityTransform()
             tform.estimate(face_kps, dst)
 
-            # Transform
-            img = v2.functional.affine(img, tform.rotation*57.2958, (tform.translation[0], tform.translation[1]) , tform.scale, 0, center = (0,0) )
+            # Transform (with tiny-roll gating)
+            rot_deg = float(tform.rotation*57.2958)
+            if abs(rot_deg) < 3.0:
+                rot_deg = 0.0
+            img = v2.functional.affine(img, rot_deg, (tform.translation[0], tform.translation[1]) , tform.scale, 0, center = (0,0) )
             img = v2.functional.crop(img, 0,0, 128, 128)
             img = v2.Resize((112, 112), interpolation=v2.InterpolationMode.BILINEAR, antialias=False)(img)
         else:
@@ -50,8 +56,11 @@ class FaceSwappers:
             tform = trans.SimilarityTransform()
             tform.estimate(face_kps, self.models_processor.arcface_dst)
 
-            # Transform
-            img = v2.functional.affine(img, tform.rotation*57.2958, (tform.translation[0], tform.translation[1]) , tform.scale, 0, center = (0,0) )
+            # Transform (with tiny-roll gating)
+            rot_deg = float(tform.rotation*57.2958)
+            if abs(rot_deg) < 3.0:
+                rot_deg = 0.0
+            img = v2.functional.affine(img, rot_deg, (tform.translation[0], tform.translation[1]) , tform.scale, 0, center = (0,0) )
             img = v2.functional.crop(img, 0,0, 112, 112)
 
         if arcface_model == 'Inswapper128ArcFace':
@@ -82,20 +91,22 @@ class FaceSwappers:
         for o in outputs:
             output_names.append(o.name)
 
-        io_binding = self.models_processor.models[arcface_model].io_binding()
-        io_binding.bind_input(name=input_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32,  shape=img.size(), buffer_ptr=img.data_ptr())
-
-        for i in range(len(output_names)):
-            io_binding.bind_output(output_names[i], self.models_processor.device)
-
-        # Sync and run model
-        if self.models_processor.device == "cuda":
+        sess = self.models_processor.models[arcface_model]
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        img_dev = img.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name=input_name, device_type=run_device, device_id=0, element_type=np.float32,  shape=img_dev.size(), buffer_ptr=img_dev.data_ptr())
+        for name in output_names:
+            io_binding.bind_output(name, run_device)
+        if run_device == 'cuda':
             torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
+        else:
             self.models_processor.syncvec.cpu()
-        self.models_processor.models[arcface_model].run_with_iobinding(io_binding)
-
-        # Return embedding
+        sess.run_with_iobinding(io_binding)
         return np.array(io_binding.copy_outputs_to_cpu()).flatten(), cropped_image
 
     def preprocess_image_cscs(self, img, face_kps):
@@ -120,17 +131,21 @@ class FaceSwappers:
         # Usa la funzione di preprocessamento
         img, cropped_image = self.preprocess_image_cscs(img, face_kps)
 
-        io_binding = self.models_processor.models['CSCSArcFace'].io_binding()
-        io_binding.bind_input(name='input', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=img.size(), buffer_ptr=img.data_ptr())
-        io_binding.bind_output(name='output', device_type=self.models_processor.device)
-
-        if self.models_processor.device == "cuda":
+        sess = self.models_processor.models['CSCSArcFace']
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        img_dev = img.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='input', device_type=run_device, device_id=0, element_type=np.float32, shape=img_dev.size(), buffer_ptr=img_dev.data_ptr())
+        io_binding.bind_output('output', run_device)
+        if run_device == 'cuda':
             torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
+        else:
             self.models_processor.syncvec.cpu()
-
-        self.models_processor.models['CSCSArcFace'].run_with_iobinding(io_binding)
-
+        sess.run_with_iobinding(io_binding)
         output = io_binding.copy_outputs_to_cpu()[0]
         embedding = torch.from_numpy(output).to('cpu')
         embedding = torch.nn.functional.normalize(embedding, dim=-1, p=2)
@@ -149,17 +164,21 @@ class FaceSwappers:
         if face_kps is not None:
             img, _ = self.preprocess_image_cscs(img, face_kps)
 
-        io_binding = self.models_processor.models['CSCSIDArcFace'].io_binding()
-        io_binding.bind_input(name='input', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=img.size(), buffer_ptr=img.data_ptr())
-        io_binding.bind_output(name='output', device_type=self.models_processor.device)
-
-        if self.models_processor.device == "cuda":
+        sess = self.models_processor.models['CSCSIDArcFace']
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        img_dev = img.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='input', device_type=run_device, device_id=0, element_type=np.float32, shape=img_dev.size(), buffer_ptr=img_dev.data_ptr())
+        io_binding.bind_output('output', run_device)
+        if run_device == 'cuda':
             torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
+        else:
             self.models_processor.syncvec.cpu()
-            
-        self.models_processor.models['CSCSIDArcFace'].run_with_iobinding(io_binding)
-
+        sess.run_with_iobinding(io_binding)
         output = io_binding.copy_outputs_to_cpu()[0]
         embedding_id = torch.from_numpy(output).to('cpu')
         embedding_id = torch.nn.functional.normalize(embedding_id, dim=-1, p=2)
@@ -174,16 +193,33 @@ class FaceSwappers:
         if not self.models_processor.models['CSCS']:
             self.models_processor.models['CSCS'] = self.models_processor.load_model('CSCS')
 
-        io_binding = self.models_processor.models['CSCS'].io_binding()
-        io_binding.bind_input(name='input_1', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=image.data_ptr())
-        io_binding.bind_input(name='input_2', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=embedding.data_ptr())
-        io_binding.bind_output(name='output', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=output.data_ptr())
-
-        if self.models_processor.device == "cuda":
-            torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
-            self.models_processor.syncvec.cpu()
-        self.models_processor.models['CSCS'].run_with_iobinding(io_binding)
+        sess = self.models_processor.models['CSCS']
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        img_dev = image.to(run_device)
+        emb_dev = embedding.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='input_1', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=img_dev.data_ptr())
+        io_binding.bind_input(name='input_2', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=emb_dev.data_ptr())
+        if str(output.device).startswith(run_device):
+            io_binding.bind_output(name='output', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=output.data_ptr())
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+        else:
+            io_binding.bind_output('output', run_device)
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+            out_np = io_binding.copy_outputs_to_cpu()[0]
+            output.copy_(torch.from_numpy(out_np).to(dtype=output.dtype, device=output.device))
 
     def calc_inswapper_latent(self, source_embedding):
         n_e = source_embedding / l2norm(source_embedding)
@@ -196,16 +232,33 @@ class FaceSwappers:
         if not self.models_processor.models['Inswapper128']:
             self.models_processor.models['Inswapper128'] = self.models_processor.load_model('Inswapper128')
 
-        io_binding = self.models_processor.models['Inswapper128'].io_binding()
-        io_binding.bind_input(name='target', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,128,128), buffer_ptr=image.data_ptr())
-        io_binding.bind_input(name='source', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=embedding.data_ptr())
-        io_binding.bind_output(name='output', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,128,128), buffer_ptr=output.data_ptr())
-
-        if self.models_processor.device == "cuda":
-            torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
-            self.models_processor.syncvec.cpu()
-        self.models_processor.models['Inswapper128'].run_with_iobinding(io_binding)
+        sess = self.models_processor.models['Inswapper128']
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        img_dev = image.to(run_device)
+        emb_dev = embedding.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='target', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,128,128), buffer_ptr=img_dev.data_ptr())
+        io_binding.bind_input(name='source', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=emb_dev.data_ptr())
+        if str(output.device).startswith(run_device):
+            io_binding.bind_output(name='output', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,128,128), buffer_ptr=output.data_ptr())
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+        else:
+            io_binding.bind_output('output', run_device)
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+            out_np = io_binding.copy_outputs_to_cpu()[0]
+            output.copy_(torch.from_numpy(out_np).to(dtype=output.dtype, device=output.device))
 
     def calc_swapper_latent_ghost(self, source_embedding):
         latent = source_embedding.reshape((1,-1))
@@ -224,16 +277,33 @@ class FaceSwappers:
         if not self.models_processor.models[ISS_MODEL_NAME]:
             self.models_processor.models[ISS_MODEL_NAME] = self.models_processor.load_model(ISS_MODEL_NAME)
         
-        io_binding = self.models_processor.models[ISS_MODEL_NAME].io_binding()
-        io_binding.bind_input(name='target', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=image.data_ptr())
-        io_binding.bind_input(name='source', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=embedding.data_ptr())
-        io_binding.bind_output(name='output', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=output.data_ptr())
-
-        if self.models_processor.device == "cuda":
-            torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
-            self.models_processor.syncvec.cpu()
-        self.models_processor.models[ISS_MODEL_NAME].run_with_iobinding(io_binding)
+        sess = self.models_processor.models[ISS_MODEL_NAME]
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        img_dev = image.to(run_device)
+        emb_dev = embedding.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='target', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=img_dev.data_ptr())
+        io_binding.bind_input(name='source', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=emb_dev.data_ptr())
+        if str(output.device).startswith(run_device):
+            io_binding.bind_output(name='output', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=output.data_ptr())
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+        else:
+            io_binding.bind_output('output', run_device)
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+            out_np = io_binding.copy_outputs_to_cpu()[0]
+            output.copy_(torch.from_numpy(out_np).to(dtype=output.dtype, device=output.device))
 
     def calc_swapper_latent_simswap512(self, source_embedding):
         latent = source_embedding.reshape(1, -1)
@@ -245,16 +315,33 @@ class FaceSwappers:
         if not self.models_processor.models['SimSwap512']:
             self.models_processor.models['SimSwap512'] = self.models_processor.load_model('SimSwap512')
 
-        io_binding = self.models_processor.models['SimSwap512'].io_binding()
-        io_binding.bind_input(name='input', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=image.data_ptr())
-        io_binding.bind_input(name='onnx::Gemm_1', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=embedding.data_ptr())
-        io_binding.bind_output(name='output', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=output.data_ptr())
-
-        if self.models_processor.device == "cuda":
-            torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
-            self.models_processor.syncvec.cpu()
-        self.models_processor.models['SimSwap512'].run_with_iobinding(io_binding)
+        sess = self.models_processor.models['SimSwap512']
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        img_dev = image.to(run_device)
+        emb_dev = embedding.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='input', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=img_dev.data_ptr())
+        io_binding.bind_input(name='onnx::Gemm_1', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=emb_dev.data_ptr())
+        if str(output.device).startswith(run_device):
+            io_binding.bind_output(name='output', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=output.data_ptr())
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+        else:
+            io_binding.bind_output('output', run_device)
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+            out_np = io_binding.copy_outputs_to_cpu()[0]
+            output.copy_(torch.from_numpy(out_np).to(dtype=output.dtype, device=output.device))
 
     def run_swapper_ghostface(self, image, embedding, output, swapper_model='GhostFace-v2'):
         ghostfaceswap_model, output_name = None, None
@@ -263,29 +350,58 @@ class FaceSwappers:
                 self.models_processor.models['GhostFacev1'] = self.models_processor.load_model('GhostFacev1')
 
             ghostfaceswap_model = self.models_processor.models['GhostFacev1']
-            output_name = '781'
+            try:
+                from app.processors import models_data
+                output_name = getattr(models_data, 'onnx_output_names', {}).get('GhostFacev1', '781')
+            except Exception:
+                output_name = '781'
 
         elif swapper_model == 'GhostFace-v2':
             if not self.models_processor.models['GhostFacev2']:
                 self.models_processor.models['GhostFacev2'] = self.models_processor.load_model('GhostFacev2')
 
             ghostfaceswap_model = self.models_processor.models['GhostFacev2']
-            output_name = '1165'
+            try:
+                from app.processors import models_data
+                output_name = getattr(models_data, 'onnx_output_names', {}).get('GhostFacev2', '1165')
+            except Exception:
+                output_name = '1165'
 
         elif swapper_model == 'GhostFace-v3':
             if not self.models_processor.models['GhostFacev3']:
                 self.models_processor.models['GhostFacev3'] = self.models_processor.load_model('GhostFacev3')
 
             ghostfaceswap_model = self.models_processor.models['GhostFacev3']
-            output_name = '1549'
+            try:
+                from app.processors import models_data
+                output_name = getattr(models_data, 'onnx_output_names', {}).get('GhostFacev3', '1549')
+            except Exception:
+                output_name = '1549'
 
-        io_binding = ghostfaceswap_model.io_binding()
-        io_binding.bind_input(name='target', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=image.data_ptr())
-        io_binding.bind_input(name='source', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=embedding.data_ptr())
-        io_binding.bind_output(name=output_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=output.data_ptr())
-
-        if self.models_processor.device == "cuda":
-            torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
-            self.models_processor.syncvec.cpu()
-        ghostfaceswap_model.run_with_iobinding(io_binding)
+        sess = ghostfaceswap_model
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        img_dev = image.to(run_device)
+        emb_dev = embedding.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='target', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=img_dev.data_ptr())
+        io_binding.bind_input(name='source', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=emb_dev.data_ptr())
+        if str(output.device).startswith(run_device):
+            io_binding.bind_output(name=output_name, device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=output.data_ptr())
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+        else:
+            io_binding.bind_output(output_name, run_device)
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+            out_np = io_binding.copy_outputs_to_cpu()[0]
+            output.copy_(torch.from_numpy(out_np).to(dtype=output.dtype, device=output.device))

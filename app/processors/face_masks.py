@@ -1,7 +1,9 @@
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn.functional as F
 import numpy as np
+import onnxruntime
 from torchvision import transforms
 from torchvision.transforms import v2
 
@@ -53,16 +55,32 @@ class FaceMasks:
     def run_occluder(self, image, output):
         if not self.models_processor.models['Occluder']:
             self.models_processor.models['Occluder'] = self.models_processor.load_model('Occluder')
+        sess = self.models_processor.models['Occluder']
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
 
-        io_binding = self.models_processor.models['Occluder'].io_binding()
-        io_binding.bind_input(name='img', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=image.data_ptr())
-        io_binding.bind_output(name='output', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,1,256,256), buffer_ptr=output.data_ptr())
-
-        if self.models_processor.device == "cuda":
-            torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
-            self.models_processor.syncvec.cpu()
-        self.models_processor.models['Occluder'].run_with_iobinding(io_binding)
+        img_dev = image.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='img', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=img_dev.data_ptr())
+        if str(output.device).startswith(run_device):
+            io_binding.bind_output(name='output', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,1,256,256), buffer_ptr=output.data_ptr())
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+        else:
+            io_binding.bind_output('output', run_device)
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+            out_np = io_binding.copy_outputs_to_cpu()[0]
+            output.copy_(torch.from_numpy(out_np).to(dtype=output.dtype, device=output.device))
 
     def apply_dfl_xseg(self, img, amount):
         img = img.type(torch.float32)
@@ -106,16 +124,32 @@ class FaceMasks:
     def run_dfl_xseg(self, image, output):
         if not self.models_processor.models['XSeg']:
             self.models_processor.models['XSeg'] = self.models_processor.load_model('XSeg')
+        sess = self.models_processor.models['XSeg']
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
 
-        io_binding = self.models_processor.models['XSeg'].io_binding()
-        io_binding.bind_input(name='in_face:0', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=image.size(), buffer_ptr=image.data_ptr())
-        io_binding.bind_output(name='out_mask:0', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,1,256,256), buffer_ptr=output.data_ptr())
-
-        if self.models_processor.device == "cuda":
-            torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
-            self.models_processor.syncvec.cpu()
-        self.models_processor.models['XSeg'].run_with_iobinding(io_binding)
+        img_dev = image.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='in_face:0', device_type=run_device, device_id=0, element_type=np.float32, shape=img_dev.size(), buffer_ptr=img_dev.data_ptr())
+        if str(output.device).startswith(run_device):
+            io_binding.bind_output(name='out_mask:0', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,1,256,256), buffer_ptr=output.data_ptr())
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+        else:
+            io_binding.bind_output('out_mask:0', run_device)
+            if run_device == 'cuda':
+                torch.cuda.synchronize()
+            else:
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+            out_np = io_binding.copy_outputs_to_cpu()[0]
+            output.copy_(torch.from_numpy(out_np).to(dtype=output.dtype, device=output.device))
         
     def apply_face_parser(self, img, parameters):
         # atts = [1 'skin', 2 'l_brow', 3 'r_brow', 4 'l_eye', 5 'r_eye', 6 'eye_g', 7 'l_ear', 8 'r_ear', 9 'ear_r', 10 'nose', 11 'mouth', 12 'u_lip', 13 'l_lip', 14 'neck', 15 'neck_l', 16 'cloth', 17 'hair', 18 'hat']
@@ -228,17 +262,68 @@ class FaceMasks:
     def run_faceparser(self, image, output):
         if not self.models_processor.models['FaceParser']:
             self.models_processor.models['FaceParser'] = self.models_processor.load_model('FaceParser')
+        sess = self.models_processor.models['FaceParser']
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
 
-        image = image.contiguous()
-        io_binding = self.models_processor.models['FaceParser'].io_binding()
-        io_binding.bind_input(name='input', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=image.data_ptr())
-        io_binding.bind_output(name='output', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,19,512,512), buffer_ptr=output.data_ptr())
+        img_dev = image.to(run_device).contiguous()
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='input', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=img_dev.data_ptr())
+        def _run_bound():
+            if str(output.device).startswith(run_device):
+                io_binding.bind_output(name='output', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,19,512,512), buffer_ptr=output.data_ptr())
+                if run_device == 'cuda':
+                    torch.cuda.synchronize()
+                else:
+                    self.models_processor.syncvec.cpu()
+                sess.run_with_iobinding(io_binding)
+            else:
+                io_binding.bind_output('output', run_device)
+                if run_device == 'cuda':
+                    torch.cuda.synchronize()
+                else:
+                    self.models_processor.syncvec.cpu()
+                sess.run_with_iobinding(io_binding)
+                out_np = io_binding.copy_outputs_to_cpu()[0]
+                output.copy_(torch.from_numpy(out_np).to(dtype=output.dtype, device=output.device))
 
-        if self.models_processor.device == "cuda":
-            torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
-            self.models_processor.syncvec.cpu()
-        self.models_processor.models['FaceParser'].run_with_iobinding(io_binding)
+        try:
+            _run_bound()
+        except Exception as e:
+            # Handle TensorRT runtime enqueue failures by reloading without TRT and retrying
+            msg = str(e)
+            if ('enqueue' in msg or 'TensorRT' in msg) and ('TensorrtExecutionProvider' in _prov):
+                try:
+                    # Disable TRT globally after the first runtime failure
+                    try:
+                        self.models_processor.trt_disabled_after_failure = True
+                    except Exception:
+                        pass
+                    new_sess = onnxruntime.InferenceSession(
+                        self.models_processor.models_path['FaceParser'],
+                        providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+                    )
+                except Exception:
+                    new_sess = onnxruntime.InferenceSession(
+                        self.models_processor.models_path['FaceParser'],
+                        providers=['CPUExecutionProvider']
+                    )
+                self.models_processor.models['FaceParser'] = new_sess
+                sess = new_sess
+                try:
+                    _prov = set(sess.get_providers())
+                except Exception:
+                    _prov = set()
+                run_device = 'cuda' if ('CUDAExecutionProvider' in _prov) else 'cpu'
+                img_dev = image.to(run_device).contiguous()
+                io_binding = sess.io_binding()
+                io_binding.bind_input(name='input', device_type=run_device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=img_dev.data_ptr())
+                _run_bound()
+            else:
+                raise
 
     def run_CLIPs(self, img, CLIPText, CLIPAmount):
         # Ottieni il dispositivo su cui si trova l'immagine
@@ -458,3 +543,116 @@ class FaceMasks:
         diff = diff.permute(2,0,1)
 
         return diff
+
+    # -----------------------
+    # Post-blend improvements
+    # -----------------------
+    def _to_float01(self, t: torch.Tensor) -> torch.Tensor:
+        if t.dtype == torch.uint8:
+            return (t.to(torch.float32) / 255.0)
+        return t.to(torch.float32)
+
+    def guided_filter_mask(self, mask: torch.Tensor, image: torch.Tensor, radius: int = 8, eps: float = 1e-4) -> torch.Tensor:
+        """
+        Edge-aware smoothing of a soft mask guided by the image content (fast guided filter).
+
+        Args:
+            mask: (H,W) or (1,H,W) float/uint8 tensor on any device, values in [0,1] preferred.
+            image: (C,H,W) float/uint8 tensor on same device; will be converted to grayscale guidance.
+            radius: window radius in pixels for the box filter (kernel size = 2*radius+1)
+            eps: regularization epsilon.
+        Returns:
+            Smoothed mask tensor with same shape as input mask.
+        """
+        dev = mask.device
+        H = mask.shape[-2]
+        W = mask.shape[-1]
+        k = max(1, int(2 * radius + 1))
+
+        # Ensure shapes: p = (1,1,H,W), I = (1,1,H,W)
+        orig_mask_dim = mask.dim()
+        p = mask
+        if p.dim() == 2:
+            # (H,W) -> (1,1,H,W)
+            p = p.unsqueeze(0).unsqueeze(0)
+        elif p.dim() == 3:
+            # Assume (C,H,W). Ensure C==1 then add batch
+            if p.shape[0] != 1:
+                p = p[:1]
+            p = p.unsqueeze(0)
+        elif p.dim() == 4:
+            # Keep batch=1, channel=1
+            if p.shape[0] != 1:
+                p = p[:1]
+            if p.shape[1] != 1:
+                p = p[:, :1]
+        else:
+            raise ValueError("Unsupported mask shape for guided_filter_mask")
+        p = self._to_float01(p).contiguous()  # (1,1,H,W)
+
+        I = image
+        if I.dim() == 2:
+            I = I.unsqueeze(0).unsqueeze(0)
+        elif I.dim() == 3:
+            # (C,H,W)
+            if I.shape[0] not in (1, 3):
+                I = I[:1]
+            I = self._to_float01(I)
+            if I.shape[0] == 3:
+                # RGB to gray (1,H,W)
+                r, g, b = I[0:1], I[1:2], I[2:3]
+                I = 0.2126*r + 0.7152*g + 0.0722*b
+            # Add batch dim -> (1,1,H,W)
+            I = I.unsqueeze(0)
+        elif I.dim() == 4:
+            # (N,C,H,W) -> ensure N=1, C=1
+            if I.shape[0] != 1:
+                I = I[:1]
+            I = self._to_float01(I)
+            if I.shape[1] == 3:
+                r, g, b = I[:,0:1], I[:,1:2], I[:,2:3]
+                I = 0.2126*r + 0.7152*g + 0.0722*b
+            elif I.shape[1] != 1:
+                I = I[:, :1]
+        else:
+            raise ValueError("Unsupported image shape for guided_filter_mask")
+
+        # Box filter via avg_pool2d (O(1) per pixel)
+        def boxf(x):
+            return F.avg_pool2d(x, kernel_size=k, stride=1, padding=radius)
+
+        mean_I = boxf(I)
+        mean_p = boxf(p)
+        corr_I = boxf(I * I)
+        corr_Ip = boxf(I * p)
+        var_I = corr_I - mean_I * mean_I
+        cov_Ip = corr_Ip - mean_I * mean_p
+
+        a = cov_Ip / (var_I + eps)
+        b = mean_p - a * mean_I
+
+        mean_a = boxf(a)
+        mean_b = boxf(b)
+        q = mean_a * I + mean_b  # (1,1,H,W)
+
+        # q: (1,1,H,W) -> (1,H,W)
+        q = q.squeeze(0)
+        q = torch.clamp(q, 0.0, 1.0)
+        # Match original mask shape
+        if orig_mask_dim == 2:
+            q = q.squeeze(0)  # (H,W)
+        return q.to(dev)
+
+    def adaptive_border_smooth(self, mask: torch.Tensor, image: torch.Tensor, strength: float = 0.5) -> torch.Tensor:
+        """
+        Apply an adaptive edge-aware smoothing on the mask borders.
+
+        - strength in [0,1]: scales the smoothing radius with respect to face size.
+        - Internally uses guided_filter_mask with a radius derived from min(H, W).
+        """
+        H = mask.shape[-2]
+        W = mask.shape[-1]
+        # Derive radius proportional to resolution; tuned for 256–512 faces
+        base = max(1, int(min(H, W) * 0.015))  # ~4px @256, ~8px @512
+        radius = max(1, int(base * (0.5 + strength)))
+        return self.guided_filter_mask(mask, image, radius=radius, eps=1e-4)

@@ -10,6 +10,7 @@ from app.ui.core.main_window import Ui_MainWindow
 import app.ui.widgets.actions.common_actions as common_widget_actions
 from app.ui.widgets.actions import card_actions
 from app.ui.widgets.actions import layout_actions
+from app.ui.widgets.actions import preset_actions
 from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import filter_actions
 from app.ui.widgets.actions import save_load_actions
@@ -135,8 +136,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.videoSeekSlider.sliderPressed.connect(partial(video_control_actions.on_slider_pressed, self))
         self.videoSeekSlider.sliderReleased.connect(partial(video_control_actions.on_slider_released, self))
         video_control_actions.set_up_video_seek_slider(self)
-        self.frameAdvanceButton.clicked.connect(partial(video_control_actions.advance_video_slider_by_n_frames, self))
-        self.frameRewindButton.clicked.connect(partial(video_control_actions.rewind_video_slider_by_n_frames, self))
+        # Ensure fine-grained stepping on the seek slider
+        try:
+            self.videoSeekSlider.setSingleStep(1)
+        except Exception:
+            pass
+        # Step one frame at a time using the step buttons
+        self.frameAdvanceButton.clicked.connect(partial(video_control_actions.advance_video_slider_by_n_frames, self, 1))
+        self.frameRewindButton.clicked.connect(partial(video_control_actions.rewind_video_slider_by_n_frames, self, 1))
+        # Helpful tooltips for users
+        try:
+            self.frameAdvanceButton.setToolTip("Next frame (+1)")
+            self.frameRewindButton.setToolTip("Previous frame (-1)")
+        except Exception:
+            pass
 
         self.addMarkerButton.clicked.connect(partial(video_control_actions.add_video_slider_marker, self))
         self.removeMarkerButton.clicked.connect(partial(video_control_actions.remove_video_slider_marker, self))
@@ -172,6 +185,34 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.saveImageButton.clicked.connect(partial(video_control_actions.save_current_frame_to_file, self))
         self.clearMemoryButton.clicked.connect(partial(common_widget_actions.clear_gpu_memory, self))
+        # Add manual actions in Faces panel controls
+        try:
+            self.warmupButton = QtWidgets.QPushButton("Warmup")
+            self.warmupButton.setFlat(True)
+            self.warmupButton.clicked.connect(partial(common_widget_actions.run_warmup, self))
+            # Place it near other face control buttons if available
+            # The buttons live under facesPanelGroupBox -> facesButtonsWidget -> verticalWidget -> controlButtonsLayout
+            self.controlButtonsLayout.addWidget(self.warmupButton)
+            self.benchmarkButton = QtWidgets.QPushButton("Benchmark")
+            self.benchmarkButton.setFlat(True)
+            self.benchmarkButton.clicked.connect(partial(common_widget_actions.run_benchmark, self))
+            self.controlButtonsLayout.addWidget(self.benchmarkButton)
+            # Profiles split-button
+            self.profilesButton = QtWidgets.QToolButton()
+            self.profilesButton.setText("Profiles")
+            self.profilesButton.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+            profiles_menu = QtWidgets.QMenu(self.profilesButton)
+            a_portrait = profiles_menu.addAction("Portrait Stable")
+            a_vlog = profiles_menu.addAction("Vlog Mobile")
+            a_lowlight = profiles_menu.addAction("Low-Light")
+            a_portrait.triggered.connect(partial(preset_actions.apply_preset, self, 'Portrait Stable'))
+            a_vlog.triggered.connect(partial(preset_actions.apply_preset, self, 'Vlog Mobile'))
+            a_lowlight.triggered.connect(partial(preset_actions.apply_preset, self, 'Low-Light'))
+            self.profilesButton.setMenu(profiles_menu)
+            self.profilesButton.setToolTip("Apply ready-made profiles: Portrait Stable, Vlog Mobile, Low-Light")
+            self.controlButtonsLayout.addWidget(self.profilesButton)
+        except Exception:
+            pass
 
         self.parametersPanelCheckBox.toggled.connect(partial(layout_actions.show_hide_parameters_panel, self))
         self.facesPanelCheckBox.toggled.connect(partial(layout_actions.show_hide_faces_panel, self))

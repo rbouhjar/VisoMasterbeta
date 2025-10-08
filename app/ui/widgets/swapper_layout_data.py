@@ -1,5 +1,6 @@
 from app.helpers import miscellaneous as misc_helpers
 from app.ui.widgets.actions import layout_actions
+from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.helpers.typing_helper import LayoutDictTypes
 
 # Widgets in Face Swap tab are created from this Layout
@@ -48,6 +49,59 @@ SWAPPER_LAYOUT_DATA: LayoutDictTypes = {
             'requiredSelectionValue': 'DeepFaceLive (DFM)',
             'help': 'RCT Color Transfer for DFM Models',
         }
+    },
+    'AI Assist': {
+        'AISmartTuningEnableToggle': {
+            'level': 1,
+            'label': 'AI Smart Tuning',
+            'default': False,
+            'help': 'Automatically adjust key settings per-frame based on motion, lighting, face size and pose. Changes are transient and do not overwrite your saved defaults.'
+        },
+        'AISmartTuningModeSelection': {
+            'level': 2,
+            'label': 'Mode',
+            'options': ['Conservative', 'Balanced', 'Aggressive'],
+            'default': 'Balanced',
+            'parentToggle': 'AISmartTuningEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Conservative = subtle adjustments, Balanced = recommended, Aggressive = stronger assistance in difficult conditions.'
+        },
+        'AISmartTuningReactivitySlider': {
+            'level': 2,
+            'label': 'Reactivity (frames)',
+            'min_value': '1',
+            'max_value': '60',
+            'default': '12',
+            'step': 1,
+            'parentToggle': 'AISmartTuningEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'How quickly the tuning reacts to changes. Lower = more reactive, higher = smoother.'
+        },
+        'AIAgentEnableToggle': {
+            'level': 1,
+            'label': 'AI Preset Agent (auto profiles)',
+            'default': False,
+            'help': 'Automatically selects one of the ready-made profiles (Portrait Stable, Vlog Mobile, Low-Light) based on motion, lighting and face size. Applies presets with a cooldown to avoid flicker.'
+        },
+        'AIAgentMinDwellSecondsSlider': {
+            'level': 2,
+            'label': 'Agent: Min Dwell (s)',
+            'min_value': '1',
+            'max_value': '20',
+            'default': '6',
+            'step': 1,
+            'parentToggle': 'AIAgentEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Minimum time in seconds to keep a chosen profile before the agent is allowed to switch again.'
+        },
+        'AIAgentDebugOverlayEnableToggle': {
+            'level': 2,
+            'label': 'Agent: Show Debug Overlay',
+            'default': False,
+            'parentToggle': 'AIAgentEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Show agent-selected profile and scene metrics on screen.'
+        },
     },
     'Face Landmarks Correction': {
         'FaceAdjEnableToggle': {
@@ -227,6 +281,62 @@ SWAPPER_LAYOUT_DATA: LayoutDictTypes = {
             'step': 1,
             'help': 'Set the similarity threshold to control how similar the detected face should be to the reference (target) face.'
         },
+        'SimilarityLocalityEnableToggle': {
+            'level': 1,
+            'label': 'Localize Impact Near Face',
+            'default': False,
+            'help': 'When enabled, the swap impact is constrained to a region near the face center to keep changes tightly focused.'
+        },
+        'SimilarityLocalityRadiusPercentSlider': {
+            'level': 2,
+            'label': 'Local Radius (%)',
+            'min_value': '5',
+            'max_value': '100',
+            'default': '35',
+            'step': 5,
+            'parentToggle': 'SimilarityLocalityEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Radius of the localized impact, as a percentage of the face crop size. Smaller values restrict the effect to the core facial region.'
+        },
+        'SimilarityLocalityFeatherPercentSlider': {
+            'level': 2,
+            'label': 'Local Feather (%)',
+            'min_value': '0',
+            'max_value': '100',
+            'default': '30',
+            'step': 5,
+            'parentToggle': 'SimilarityLocalityEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Feathering at the edge of the localized region for a smooth transition.'
+        },
+        'AutoThresholdAssistEnableToggle': {
+            'level': 1,
+            'label': 'Auto Threshold Assist',
+            'default': False,
+            'help': 'When enabled, slightly relaxes the similarity threshold on sustained no-match streaks and resets after a successful swap.'
+        },
+        'AutoThresholdAssistMaxDropSlider': {
+            'level': 2,
+            'label': 'Assist: Max Threshold Drop',
+            'min_value': '0',
+            'max_value': '30',
+            'default': '10',
+            'step': 1,
+            'parentToggle': 'AutoThresholdAssistEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Maximum number of points the effective similarity threshold can be lowered (bounded).'
+        },
+        'AutoThresholdAssistFramesPerStepSlider': {
+            'level': 2,
+            'label': 'Assist: Frames per Step',
+            'min_value': '1',
+            'max_value': '60',
+            'default': '15',
+            'step': 1,
+            'parentToggle': 'AutoThresholdAssistEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Number of consecutive no-match frames required to lower the threshold by one point.'
+        },
         'StrengthEnableToggle': {
             'level': 1,
             'label': 'Strength',
@@ -289,6 +399,12 @@ SWAPPER_LAYOUT_DATA: LayoutDictTypes = {
             'parentToggle': 'DifferencingEnableToggle',
             'requiredToggleValue': True,
             'help': 'Blend differecing value.'
+        },
+        'RecognitionDebugOverlayEnableToggle': {
+            'level': 1,
+            'label': 'Show Recognition Debug Overlay',
+            'default': False,
+            'help': 'Displays top similarity and thresholds on-screen to help tune recognition.'
         },
     },
     'Face Mask':{
@@ -880,6 +996,23 @@ SWAPPER_LAYOUT_DATA: LayoutDictTypes = {
             'requiredToggleValue': True,
             'help': 'Adjust the blur of mask border.'
         },
+        'AutoPitchCompEnableToggle': {
+            'level': 1,
+            'label': 'Auto Pitch Compensation (Mask)',
+            'default': False,
+            'help': 'Adapte le blend du masque selon l\'inclinaison (tête vers le bas/haut).'
+        },
+        'AutoPitchCompStrengthSlider': {
+            'level': 2,
+            'label': 'Pitch Compensation Strength',
+            'min_value': '0',
+            'max_value': '100',
+            'default': '40',
+            'step': 5,
+            'parentToggle': 'AutoPitchCompEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Force d\'atténuation directionnelle (haut/bas) près du bord du masque.'
+        },
     },
     
     'Face Color Correction':{
@@ -1069,6 +1202,49 @@ SWAPPER_LAYOUT_DATA: LayoutDictTypes = {
             'requiredToggleValue': True,
             'help': 'Adjust the final blend value.'
         },
+        'AdaptiveFeatherEnableToggle': {
+            'level': 1,
+            'label': 'Adaptive Feather',
+            'default': False,
+            'help': 'Feather proportionnel à la taille du visage pour des bords plus naturels.'
+        },
+        'AdaptiveFeatherPercentSlider': {
+            'level': 2,
+            'label': 'Feather (%)',
+            'min_value': '0',
+            'max_value': '100',
+            'default': '15',
+            'step': 1,
+            'parentToggle': 'AdaptiveFeatherEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Pourcentage du plus grand côté du visage utilisé comme rayon de feather.'
+        },
+        'EdgeSmoothingEnableToggle': {
+            'level': 1,
+            'label': 'Edge Smoothing',
+            'default': False,
+            'help': 'Lissage guidé du bord du masque (guided/bilateral) pour réduire les halos.'
+        },
+        'EdgeSmoothingStrengthSlider': {
+            'level': 2,
+            'label': 'Smoothing Strength',
+            'min_value': '0',
+            'max_value': '100',
+            'default': '30',
+            'step': 5,
+            'parentToggle': 'EdgeSmoothingEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Force du lissage sur la zone de bord (0 = désactivé).'
+        },
+        'WarpPresetSelection': {
+            'level': 1,
+            'label': 'Presets',
+            'options': ['Manual', 'Steady Shot', 'Mobile Vlog', 'Portrait Studio'],
+            'default': 'Manual',
+            'help': 'Apply one-click profiles that set Warp Detail, Regularization, and Edge Smoothing.',
+            'exec_function': common_widget_actions.apply_warp_preset,
+            'exec_function_args': []
+        },
         'OverallMaskBlendAmountSlider': {
             'level': 1,
             'label': 'Overall Mask Blend Amount',
@@ -1077,6 +1253,43 @@ SWAPPER_LAYOUT_DATA: LayoutDictTypes = {
             'default': '0',
             'step': 1,
             'help': 'Combined masks blending distance. It is not applied to the border masks.'
+        },
+        'NonRigidWarpEnableToggle': {
+            'level': 1,
+            'label': 'Non-Rigid Warp (3D-like)',
+            'default': False,
+            'help': "Warp the swapped face and mask with dense landmarks (piecewise affine) for more natural local shape. Falls back to classic paste when insufficient points."
+        },
+        'NonRigidWarpModeSelection': {
+            'level': 2,
+            'label': 'Mode',
+            'options': ['Manual', 'Auto'],
+            'default': 'Auto',
+            'parentToggle': 'NonRigidWarpEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Manual: always use when enabled. Auto: engage only when enough reliable landmarks and motion is low.'
         },        
+        'NonRigidWarpDetailSlider': {
+            'level': 2,
+            'label': 'Warp Detail',
+            'min_value': '1',
+            'max_value': '100',
+            'default': '60',
+            'step': 5,
+            'parentToggle': 'NonRigidWarpEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Controls deformation granularity. Lower = fewer control points (smoother, more rigid). Higher = more points (more local detail).'
+        },
+        'NonRigidWarpRegularizationSlider': {
+            'level': 2,
+            'label': 'Regularization (blend %)',
+            'min_value': '0',
+            'max_value': '100',
+            'default': '20',
+            'step': 5,
+            'parentToggle': 'NonRigidWarpEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Blend a portion of classic affine paste-back to stiffen the non-rigid warp (higher = more stable, less deformable).'
+        },
     },
 }

@@ -83,28 +83,137 @@ def update_parameter(main_window: 'MainWindow', parameter_name, parameter_value,
     if main_window.markers.get(current_position) and face_id:
         main_window.markers[current_position]['parameters'][face_id][parameter_name] = parameter_value
 
-    if main_window.target_faces and face_id:
-        # Store old value and update the parameters with new value
-        old_parameter_value = main_window.parameters[face_id][parameter_name]
+    if main_window.target_faces and (face_id is not None):
+        # Ensure parameter dict exists for this face id
+        try:
+            create_parameter_dict_for_face_id(main_window, face_id)
+        except Exception:
+            pass
+        # Store old value (with fallback if key missing) and update the parameters with new value
+        try:
+            old_parameter_value = main_window.parameters[face_id].get(parameter_name, main_window.default_parameters.get(parameter_name))
+        except Exception:
+            old_parameter_value = None
         main_window.parameters[face_id][parameter_name] = parameter_value
 
         if enable_refresh_frame:
             refresh_frame(main_window)
 
-        if exec_function and face_id:
+        if exec_function and (face_id is not None):
             # Only execute the function if the value is different from current
             if main_window.parameters[face_id][parameter_name] != old_parameter_value:
                 # By default an exec function definition should have atleast one parameter : MainWindow
                 exec_function_args = [main_window, parameter_value] + exec_function_args
                 exec_function(*exec_function_args)
 
-    if main_window.current_widget_parameters:
-        main_window.current_widget_parameters[parameter_name] = parameter_value
+    if main_window.current_widget_parameters is not None:
+        try:
+            main_window.current_widget_parameters[parameter_name] = parameter_value
+        except Exception:
+            pass
 
 def refresh_frame(main_window: 'MainWindow'):
     video_processor = main_window.video_processor
     if not video_processor.processing:
         video_processor.process_current_frame()
+
+def apply_warp_preset(main_window: 'MainWindow', preset_name: str):
+    """Apply one-click presets to related non-rigid warp and smoothing parameters.
+
+    Presets:
+      - Steady Shot: balanced scenes with moderate motion
+      - Mobile Vlog: more regularization and smoothing for shaky footage
+      - Portrait Studio: higher detail, lighter regularization
+    """
+    # Map preset to parameter values
+    presets = {
+        'Steady Shot': {
+            'NonRigidWarpEnableToggle': True,
+            'NonRigidWarpModeSelection': 'Auto',
+            'NonRigidWarpDetailSlider': 55,
+            'NonRigidWarpRegularizationSlider': 30,
+            'EdgeSmoothingEnableToggle': True,
+            'EdgeSmoothingStrengthSlider': 25,
+        },
+        'Mobile Vlog': {
+            'NonRigidWarpEnableToggle': True,
+            'NonRigidWarpModeSelection': 'Auto',
+            'NonRigidWarpDetailSlider': 45,
+            'NonRigidWarpRegularizationSlider': 40,
+            'EdgeSmoothingEnableToggle': True,
+            'EdgeSmoothingStrengthSlider': 35,
+        },
+        'Portrait Studio': {
+            'NonRigidWarpEnableToggle': True,
+            'NonRigidWarpModeSelection': 'Auto',
+            'NonRigidWarpDetailSlider': 75,
+            'NonRigidWarpRegularizationSlider': 15,
+            'EdgeSmoothingEnableToggle': True,
+            'EdgeSmoothingStrengthSlider': 25,
+        },
+    }
+
+    if preset_name not in presets:
+        # 'Manual' or unknown: do nothing beyond refreshing visibility to avoid surprises
+        return
+
+    values = presets[preset_name]
+
+    # Temporarily suspend per-change refresh to avoid multiple reprocessing passes
+    widgets = main_window.parameter_widgets
+    to_toggle = [
+        'NonRigidWarpEnableToggle',
+        'EdgeSmoothingEnableToggle',
+    ]
+    to_select = [
+        'NonRigidWarpModeSelection',
+    ]
+    to_sliders = [
+        'NonRigidWarpDetailSlider',
+        'NonRigidWarpRegularizationSlider',
+        'EdgeSmoothingStrengthSlider',
+    ]
+
+    # Update toggles
+    for name in to_toggle:
+        if name in values and name in widgets:
+            w = widgets[name]
+            w.enable_refresh_frame = False
+            w.set_value(values[name])
+            update_parameter(main_window, name, values[name], enable_refresh_frame=False)
+            w.enable_refresh_frame = True
+
+    # Update selections
+    for name in to_select:
+        if name in values and name in widgets:
+            w = widgets[name]
+            w.enable_refresh_frame = False
+            w.set_value(values[name])
+            update_parameter(main_window, name, values[name], enable_refresh_frame=False)
+            w.enable_refresh_frame = True
+
+    # Update sliders
+    for name in to_sliders:
+        if name in values and name in widgets:
+            w = widgets[name]
+            w.enable_refresh_frame = False
+            w.set_value(values[name])
+            update_parameter(main_window, name, values[name], enable_refresh_frame=False)
+            # If the slider has linked line_edit, sync it
+            if getattr(w, 'line_edit', None):
+                try:
+                    w.line_edit.set_value(values[name])
+                except Exception:
+                    pass
+            w.enable_refresh_frame = True
+
+    # Ensure linked visibility updates (children of toggles)
+    for name in to_toggle:
+        if name in widgets:
+            show_hide_related_widgets(main_window, widgets[name], name)
+
+    # Finally refresh once
+    refresh_frame(main_window)
 
 # Function to Hide Elements conditionally from values in LayoutData (Currently supports using Selection box and Toggle button to hide other widgets)
 def show_hide_related_widgets(main_window: 'MainWindow', parent_widget, parent_widget_name: str, value1=False, value2=False):
@@ -272,9 +381,88 @@ def clear_gpu_memory(main_window: 'MainWindow'):
     main_window.editFacesButton.setChecked(False)
     update_gpu_memory_progressbar(main_window)
 
+def run_warmup(main_window: 'MainWindow'):
+    """Exécuter ModelsProcessor.warmup() en thread et afficher un toast avec le résultat."""
+    def _worker():
+        try:
+            main_window.model_loading_signal.emit()
+            results = main_window.models_processor.warmup()
+            oks = [k for k, v in results.items() if str(v).lower() == 'ok']
+            fails = {k: v for k, v in results.items() if str(v).lower() != 'ok' and not str(v).startswith('skipped')}
+            if fails:
+                msg = f"OK: {', '.join(oks) if oks else 'aucun'} | Échecs: " + \
+                      ", ".join([f"{k}: {v}" for k, v in fails.items()])
+                QtCore.QTimer.singleShot(0, partial(create_and_show_toast_message, main_window, 'Warmup', msg, 'warning'))
+            else:
+                msg = f"OK: {', '.join(oks) if oks else 'aucun'}"
+                QtCore.QTimer.singleShot(0, partial(create_and_show_toast_message, main_window, 'Warmup', msg, 'success'))
+        except Exception as e:
+            QtCore.QTimer.singleShot(0, partial(create_and_show_toast_message, main_window, 'Warmup', f'Échec: {e}', 'error'))
+        finally:
+            main_window.model_loaded_signal.emit()
+    threading.Thread(target=_worker, daemon=True).start()
     main_window.videoSeekSlider.markers = set()
     main_window.videoSeekSlider.update()
 
+    def run_benchmark(main_window: 'MainWindow'):
+        """Mesure des temps moyens (ms) pour FaceParser, Landmarks478 et GhostFace-v2 et affiche un toast."""
+        import time
+        import torch
+        import numpy as np
+
+        def _avg_time(fn, iters=5):
+            # warmup
+            try:
+                fn()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+            except Exception:
+                pass
+            t0 = time.perf_counter()
+            for _ in range(iters):
+                fn()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            return (t1 - t0) / iters
+
+        def _worker():
+            try:
+                mp = main_window.models_processor
+                main_window.model_loading_signal.emit()
+
+                # FaceParser
+                mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
+                std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
+                parser_in = (torch.rand((1, 3, 512, 512), dtype=torch.float32) - mean) / std
+                parser_out = torch.empty((1, 19, 512, 512), dtype=torch.float32, device='cpu')
+                def _parser():
+                    mp.run_faceparser(parser_in, parser_out)
+                t_parser = _avg_time(_parser, iters=5)
+
+                # Landmarks 478
+                img = torch.randint(0, 255, (3, 512, 512), dtype=torch.uint8)
+                bbox = np.array([100, 100, 400, 400], dtype=np.float32)
+                def _lmk():
+                    mp.face_landmark_detectors.run_detect_landmark(img, bbox, det_kpss=np.array([]), detect_mode='478', score=0.0, from_points=False)
+                t_lmk = _avg_time(_lmk, iters=5)
+
+                # GhostFace v2
+                emb = torch.randn((1, 512), dtype=torch.float32)
+                gf_in = torch.rand((1, 3, 256, 256), dtype=torch.float32)
+                gf_out = torch.empty((1, 3, 256, 256), dtype=torch.float32, device='cpu')
+                def _gf():
+                    mp.run_swapper_ghostface(gf_in, emb, gf_out, 'GhostFace-v2')
+                t_gf = _avg_time(_gf, iters=3)
+
+                msg = f"FaceParser: {t_parser*1000:.1f} ms | Landmarks478: {t_lmk*1000:.1f} ms | GhostFace-v2: {t_gf*1000:.1f} ms"
+                QtCore.QTimer.singleShot(0, partial(create_and_show_toast_message, main_window, 'Benchmark', msg, 'information'))
+            except Exception as e:
+                QtCore.QTimer.singleShot(0, partial(create_and_show_toast_message, main_window, 'Benchmark', f'Echec: {e}', 'error'))
+            finally:
+                main_window.model_loaded_signal.emit()
+
+        threading.Thread(target=_worker, daemon=True).start()
 def extract_frame_as_pixmap(media_file_path, file_type, webcam_index=False, webcam_backend=False):
     frame = False
 

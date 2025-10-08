@@ -84,13 +84,30 @@ def get_file_type(file_name):
     return None
 
 def get_hash_from_filename(filename):
-    """Generate a hash from just the filename (not the full path)."""
-    # Use just the filename without path
-    name = os.path.basename(filename)
-    # Create hash from filename and size for uniqueness
-    file_size = os.path.getsize(filename)
-    hash_input = f"{name}_{file_size}"
-    return hashlib.md5(hash_input.encode('utf-8')).hexdigest()
+    """Generate a stable hash for thumbnails from a filename.
+    Prefer filename + file size when the file exists; otherwise, fall back to
+    a hash of the normalized path + basename to remain stable across sessions
+    and avoid crashes on missing files.
+    """
+    try:
+        name = os.path.basename(filename or "")
+        # Use size when file exists for stronger uniqueness
+        if filename and os.path.isfile(filename):
+            try:
+                file_size = os.path.getsize(filename)
+                hash_input = f"{name}_{file_size}"
+            except Exception:
+                # If size cannot be read, fall back to normalized path string
+                norm = os.path.normpath(str(filename))
+                hash_input = f"{name}_{norm}"
+        else:
+            # Missing file: use normalized path string for deterministic hash
+            norm = os.path.normpath(str(filename))
+            hash_input = f"{name}_{norm}"
+        return hashlib.md5(hash_input.encode('utf-8')).hexdigest()
+    except Exception:
+        # Last-resort fallback to avoid any crash in UI paths
+        return hashlib.md5(str(filename).encode('utf-8')).hexdigest()
 
 def get_thumbnail_path(file_hash):
     """Get the full path to a cached thumbnail."""

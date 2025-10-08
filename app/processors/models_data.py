@@ -69,6 +69,14 @@ landmark_model_mapping = {
 }
 
 
+# ONNX output tensor names for GhostFace variants to avoid hard-coded literals in runtime code
+onnx_output_names = {
+    'GhostFacev1': '781',
+    'GhostFacev2': '1165',
+    'GhostFacev3': '1549',
+}
+
+
 
 models_list = [
     {
@@ -110,21 +118,25 @@ models_list = [
         "model_name": "GhostFacev1",
         "local_path": f"{models_dir}/ghost_unet_1_block.onnx",
         "hash": "304a86bccb325e7fcf5ab4f4f84ba5172e319bccc9de15d299bb436746e2e024",
-        "url": f"{assets_repo}/v0.1.0/ghost_unet_1_block.onnx"
+        "url": f"{assets_repo}/v0.1.0/ghost_unet_1_block.onnx",
+        # Prefer CUDA EP for this model with CPU fallback; avoid forcing TRT by default
+        "provider_hint": ["CUDAExecutionProvider", "CPUExecutionProvider"],
 
     },
     {
         "model_name": "GhostFacev2",
         "local_path": f"{models_dir}/ghost_unet_2_block.onnx",
         "hash": "25b72c107aabe27fc65ac5bf5377e58eda0929872d4dd3de5d5a9edefc49fa9f",
-        "url": f"{assets_repo}/v0.1.0/ghost_unet_2_block.onnx"
+        "url": f"{assets_repo}/v0.1.0/ghost_unet_2_block.onnx",
+        "provider_hint": ["CUDAExecutionProvider", "CPUExecutionProvider"],
 
     },
     {
         "model_name": "GhostFacev3",
         "local_path": f"{models_dir}/ghost_unet_3_block.onnx",
         "hash": "f471d4f322903da2bca360aa0d7ab9922e3b0001d683f825ca6b15d865382935",
-        "url": f"{assets_repo}/v0.1.0/ghost_unet_3_block.onnx"
+        "url": f"{assets_repo}/v0.1.0/ghost_unet_3_block.onnx",
+        "provider_hint": ["CUDAExecutionProvider", "CPUExecutionProvider"],
 
     },
     {
@@ -410,7 +422,9 @@ models_list = [
         "model_name": "FaceParser",
         "local_path": f"{models_dir}/faceparser_resnet34.onnx",
         "hash": "5b805bba7b5660ab7070b5a381dcf75e5b3e04199f1e9387232a77a00095102e",
-        "url": f"{assets_repo}/v0.1.0/faceparser_resnet34.onnx"
+        "url": f"{assets_repo}/v0.1.0/faceparser_resnet34.onnx",
+        # TRT EP often gives no additional benefit here; default to CUDA→CPU
+        "provider_hint": ["CUDAExecutionProvider", "CPUExecutionProvider"],
 
     },
     {

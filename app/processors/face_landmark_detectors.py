@@ -24,14 +24,17 @@ class FaceLandmarkDetectors:
         if detect_mode=='5':
             if not self.models_processor.models['FaceLandmark5']:
                 self.models_processor.models['FaceLandmark5'] = self.models_processor.load_model('FaceLandmark5')
-
+            # Ensure anchors are initialized even if model was loaded earlier or memory was cleared
+            try:
+                need_anchors = (not hasattr(self.models_processor, 'anchors')) or (not self.models_processor.anchors) or (len(self.models_processor.anchors) % 4 != 0)
+            except Exception:
+                need_anchors = True
+            if need_anchors:
                 feature_maps = [[64, 64], [32, 32], [16, 16]]
                 min_sizes = [[16, 32], [64, 128], [256, 512]]
                 steps = [8, 16, 32]
                 image_size = 512
-                # re-initialize self.models_processor.anchors due to clear_mem function
-                self.models_processor.anchors  = []
-
+                self.models_processor.anchors = []
                 for k, f in enumerate(feature_maps):
                     min_size_array = min_sizes[k]
                     for i, j in product(range(f[0]), range(f[1])):
@@ -126,27 +129,121 @@ class FaceLandmarkDetectors:
         tmp = [width, height, width, height, width, height, width, height, width, height]
         scale1 = torch.tensor(tmp, dtype=torch.float32, device=self.models_processor.device)
 
-        conf = torch.empty((1,10752,2), dtype=torch.float32, device=self.models_processor.device).contiguous()
-        landmarks = torch.empty((1,10752,10), dtype=torch.float32, device=self.models_processor.device).contiguous()
+        # Determine IO names and expected sizes dynamically from session and anchors
+        sess = self.models_processor.models['FaceLandmark5']
+        input_name = None
+        try:
+            input_name = sess.get_inputs()[0].name
+        except Exception:
+            input_name = 'input'
+        # Expected prior count from anchors
+        n_priors = max(1, int(len(self.models_processor.anchors) // 4))
 
-        io_binding = self.models_processor.models['FaceLandmark5'].io_binding()
-        io_binding.bind_input(name='input', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=image.data_ptr())
-        io_binding.bind_output(name='conf', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,10752,2), buffer_ptr=conf.data_ptr())
-        io_binding.bind_output(name='landmarks', device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,10752,10), buffer_ptr=landmarks.data_ptr())
+        # Resolve output names by shape hints or name hints
+        conf_name, lmk_name = 'conf', 'landmarks'
+        try:
+            outs = sess.get_outputs()
+            conf_candidates = []
+            lmk_candidates = []
+            for o in outs:
+                name = o.name
+                shp = list(getattr(o, 'shape', []) or [])
+                last = shp[-1] if len(shp) > 0 and isinstance(shp[-1], int) else None
+                lname = name.lower()
+                if 'conf' in lname or last == 2:
+                    conf_candidates.append(name)
+                if 'land' in lname or last == 10:
+                    lmk_candidates.append(name)
+            if conf_candidates:
+                conf_name = conf_candidates[0]
+            if lmk_candidates:
+                lmk_name = lmk_candidates[0]
+            # Fallback if ambiguous and exactly 2 outputs
+            if (not conf_candidates or not lmk_candidates) and len(outs) >= 2:
+                conf_name = outs[0].name
+                lmk_name = outs[1].name
+        except Exception:
+            pass
+
+        # Pre-bind outputs to device buffers matching anchors
+        conf = torch.empty((1, n_priors, 2), dtype=torch.float32, device=self.models_processor.device).contiguous()
+        landmarks = torch.empty((1, n_priors, 10), dtype=torch.float32, device=self.models_processor.device).contiguous()
+
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name=input_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=image.data_ptr())
+        io_binding.bind_output(name=conf_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=tuple(conf.size()), buffer_ptr=conf.data_ptr())
+        io_binding.bind_output(name=lmk_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=tuple(landmarks.size()), buffer_ptr=landmarks.data_ptr())
 
         if self.models_processor.device == "cuda":
             torch.cuda.synchronize()
         elif self.models_processor.device != "cpu":
             self.models_processor.syncvec.cpu()
-        self.models_processor.models['FaceLandmark5'].run_with_iobinding(io_binding)
+        try:
+            sess.run_with_iobinding(io_binding)
+        except Exception:
+            # As a fallback, run with ORT-allocated outputs and copy to CPU
+            io_binding = sess.io_binding()
+            io_binding.bind_input(name=input_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=(1,3,512,512), buffer_ptr=image.data_ptr())
+            # Let ORT allocate all outputs
+            try:
+                for o in sess.get_outputs():
+                    io_binding.bind_output(o.name, self.models_processor.device)
+            except Exception:
+                # Still bind the expected names
+                io_binding.bind_output(conf_name, self.models_processor.device)
+                io_binding.bind_output(lmk_name, self.models_processor.device)
+            if self.models_processor.device == "cuda":
+                torch.cuda.synchronize()
+            elif self.models_processor.device != "cpu":
+                self.models_processor.syncvec.cpu()
+            sess.run_with_iobinding(io_binding)
+            outs_cpu = io_binding.copy_outputs_to_cpu()
+            try:
+                # Map outputs by name order from session
+                names = [o.name for o in sess.get_outputs()]
+                out_map = { n: v for n, v in zip(names, outs_cpu) }
+                if conf_name in out_map:
+                    conf = torch.from_numpy(out_map[conf_name]).to(self.models_processor.device)
+                else:
+                    conf = torch.from_numpy(outs_cpu[0]).to(self.models_processor.device)
+                if lmk_name in out_map:
+                    landmarks = torch.from_numpy(out_map[lmk_name]).to(self.models_processor.device)
+                else:
+                    landmarks = torch.from_numpy(outs_cpu[1]).to(self.models_processor.device)
+            except Exception:
+                # Final fallback: keep previous buffers (may be empty)
+                pass
 
-        scores = torch.squeeze(conf)[:, 1]
+        # Compute scores from confidence tensor (expect shape [1, N, 2] or [N, 2])
+        conf_s = conf.squeeze(0) if conf.dim() == 3 else conf
+        if conf_s.numel() == 0 or conf_s.dim() < 2 or conf_s.shape[-1] < 2:
+            return [], [], []
+        scores = conf_s[:, 1]
         priors = torch.tensor(self.models_processor.anchors).view(-1, 4)
         priors = priors.to(self.models_processor.device)
 
-        pre = torch.squeeze(landmarks, 0)
+        pre = landmarks.squeeze(0) if landmarks.dim() == 3 else landmarks
+        # Guard against unexpected empty outputs
+        if pre.dim() != 2 or pre.shape[1] < 10 or pre.shape[0] == 0:
+            return [], [], []
 
-        tmp = (priors[:, :2] + pre[:, :2] * 0.1 * priors[:, 2:], priors[:, :2] + pre[:, 2:4] * 0.1 * priors[:, 2:], priors[:, :2] + pre[:, 4:6] * 0.1 * priors[:, 2:], priors[:, :2] + pre[:, 6:8] * 0.1 * priors[:, 2:], priors[:, :2] + pre[:, 8:10] * 0.1 * priors[:, 2:])
+        # Handle potential mismatch in rows between priors and predictions (take safe min)
+        if priors.shape[0] != pre.shape[0]:
+            m = int(min(priors.shape[0], pre.shape[0]))
+            if m <= 0:
+                return [], [], []
+            pri = priors[:m]
+            pr = pre[:m]
+        else:
+            pri = priors
+            pr = pre
+        tmp = (
+            pri[:, :2] + pr[:, :2] * 0.1 * pri[:, 2:],
+            pri[:, :2] + pr[:, 2:4] * 0.1 * pri[:, 2:],
+            pri[:, :2] + pr[:, 4:6] * 0.1 * pri[:, 2:],
+            pri[:, :2] + pr[:, 6:8] * 0.1 * pri[:, 2:],
+            pri[:, :2] + pr[:, 8:10] * 0.1 * pri[:, 2:],
+        )
         landmarks = torch.cat(tmp, dim=1)
         landmarks = torch.mul(landmarks, scale1)
 
@@ -434,19 +531,23 @@ class FaceLandmarkDetectors:
         aimg = torch.unsqueeze(aimg, 0).contiguous()
         aimg = aimg.to(dtype=torch.float32)
         aimg = torch.div(aimg, 255.0)
-        io_binding = self.models_processor.models['FaceLandmark478'].io_binding()
-        io_binding.bind_input(name='input_12', device_type=self.models_processor.device, device_id=0, element_type=np.float32,  shape=aimg.size(), buffer_ptr=aimg.data_ptr())
-
-        io_binding.bind_output('Identity', self.models_processor.device)
-        io_binding.bind_output('Identity_1', self.models_processor.device)
-        io_binding.bind_output('Identity_2', self.models_processor.device)
-
-        # Sync and run model
-        if self.models_processor.device == "cuda":
+        sess = self.models_processor.models['FaceLandmark478']
+        try:
+            _prov = set(sess.get_providers())
+        except Exception:
+            _prov = set()
+        run_device = 'cuda' if ('CUDAExecutionProvider' in _prov or 'TensorrtExecutionProvider' in _prov) else 'cpu'
+        aimg_dev = aimg.to(run_device)
+        io_binding = sess.io_binding()
+        io_binding.bind_input(name='input_12', device_type=run_device, device_id=0, element_type=np.float32,  shape=aimg_dev.size(), buffer_ptr=aimg_dev.data_ptr())
+        io_binding.bind_output('Identity', run_device)
+        io_binding.bind_output('Identity_1', run_device)
+        io_binding.bind_output('Identity_2', run_device)
+        if run_device == 'cuda':
             torch.cuda.synchronize()
-        elif self.models_processor.device != "cpu":
+        else:
             self.models_processor.syncvec.cpu()
-        self.models_processor.models['FaceLandmark478'].run_with_iobinding(io_binding)
+        sess.run_with_iobinding(io_binding)
         landmarks, faceflag, blendshapes = io_binding.copy_outputs_to_cpu() # pylint: disable=unused-variable
         landmarks = landmarks.reshape( (1,478,3))
 
@@ -472,18 +573,22 @@ class FaceLandmarkDetectors:
                 landmark_for_score = landmark_for_score[:, :2]
                 landmark_for_score = np.expand_dims(landmark_for_score, axis=0)
                 landmark_for_score = landmark_for_score.astype(np.float32)
-                landmark_for_score = torch.from_numpy(landmark_for_score).to(self.models_processor.device)
-
-                io_binding_bs = self.models_processor.models['FaceBlendShapes'].io_binding()
-                io_binding_bs.bind_input(name='input_points', device_type=self.models_processor.device, device_id=0, element_type=np.float32,  shape=tuple(landmark_for_score.shape), buffer_ptr=landmark_for_score.data_ptr())
-                io_binding_bs.bind_output('output', self.models_processor.device)
-
-                # Sync and run model
-                if self.models_processor.device == "cuda":
+                landmark_for_score = torch.from_numpy(landmark_for_score)
+                sess_bs = self.models_processor.models['FaceBlendShapes']
+                try:
+                    _prov_bs = set(sess_bs.get_providers())
+                except Exception:
+                    _prov_bs = set()
+                run_device_bs = 'cuda' if ('CUDAExecutionProvider' in _prov_bs or 'TensorrtExecutionProvider' in _prov_bs) else 'cpu'
+                lmk_dev = landmark_for_score.to(run_device_bs)
+                io_binding_bs = sess_bs.io_binding()
+                io_binding_bs.bind_input(name='input_points', device_type=run_device_bs, device_id=0, element_type=np.float32,  shape=tuple(lmk_dev.shape), buffer_ptr=lmk_dev.data_ptr())
+                io_binding_bs.bind_output('output', run_device_bs)
+                if run_device_bs == 'cuda':
                     torch.cuda.synchronize()
-                elif self.models_processor.device != "cpu":
+                else:
                     self.models_processor.syncvec.cpu()
-                self.models_processor.models['FaceBlendShapes'].run_with_iobinding(io_binding_bs)
+                sess_bs.run_with_iobinding(io_binding_bs)
                 landmark_score = io_binding_bs.copy_outputs_to_cpu()[0] # pylint: disable=unused-variable
 
                 # convert from 478 to 5 keypoints

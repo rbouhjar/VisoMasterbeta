@@ -88,7 +88,13 @@ def add_widgets_to_tab_layout(main_window: 'MainWindow', LAYOUT_DATA: LayoutDict
                 def onchange(selection_widget: widget_components.SelectionBox, selection_widget_name, widget_data: dict, selected_value=False):
                     # selected_value = selection_widget.currentText()
                     if data_type=='parameter':
+                        # Update parameter value
                         common_widget_actions.update_parameter(main_window, selection_widget_name, selected_value, enable_refresh_frame=selection_widget.enable_refresh_frame)
+                        # Optionally execute an attached function (e.g., Presets) for parameter selections
+                        exec_fn = widget_data.get('exec_function')
+                        if exec_fn:
+                            exec_args = widget_data.get('exec_function_args', [])
+                            exec_fn(main_window, selected_value, *exec_args)
                     elif data_type=='control':
                         common_widget_actions.update_control(main_window, selection_widget_name, selected_value, exec_function=widget_data.get('exec_function'), exec_function_args=widget_data.get('exec_function_args', []))
                 widget.currentTextChanged.connect(partial(onchange, widget, widget_name, widget_data))
